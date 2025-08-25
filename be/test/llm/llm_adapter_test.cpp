@@ -471,6 +471,7 @@ TEST(LLM_ADAPTER_TEST, voyage_adapter_chat_test) {
     VoyageAIAdapter adapter;
     TLLMResource config;
     config.api_key = "test_voyage_key";
+    config.provider_type = "VoyageAI";
 
     adapter.init(config);
     MockHttpClient mock_client;
