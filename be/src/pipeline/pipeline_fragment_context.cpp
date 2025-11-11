@@ -106,6 +106,7 @@
 #include "runtime/thread_context.h"
 #include "service/backend_options.h"
 #include "util/container_util.hpp"
+#include "util/countdown_latch.h"
 #include "util/debug_util.h"
 #include "util/uid_util.h"
 #include "vec/common/sort/heap_sorter.h"
@@ -132,18 +133,17 @@ PipelineFragmentContext::~PipelineFragmentContext() {
     // The memory released by the query end is recorded in the query mem tracker.
     SCOPED_SWITCH_THREAD_MEM_TRACKER_LIMITER(_query_ctx->query_mem_tracker);
     auto st = _query_ctx->exec_status();
-    _query_ctx.reset();
     for (size_t i = 0; i < _tasks.size(); i++) {
         if (!_tasks[i].empty()) {
             _call_back(_tasks[i].front()->runtime_state(), &st);
         }
     }
-    _tasks.clear();
     for (auto& runtime_states : _task_runtime_states) {
         for (auto& runtime_state : runtime_states) {
             runtime_state.reset();
         }
     }
+    _tasks.clear();
     _dag.clear();
     _pip_id_to_pipeline.clear();
     _pipelines.clear();
@@ -153,6 +153,7 @@ PipelineFragmentContext::~PipelineFragmentContext() {
     _runtime_filter_states.clear();
     _runtime_filter_mgr_map.clear();
     _op_id_to_le_state.clear();
+    _query_ctx.reset();
 }
 
 bool PipelineFragmentContext::is_timeout(timespec now) const {
@@ -206,6 +207,10 @@ void PipelineFragmentContext::cancel(const Status reason) {
     auto stream_load_ctx = _exec_env->new_load_stream_mgr()->get(_query_id);
     if (stream_load_ctx != nullptr) {
         stream_load_ctx->pipe->cancel(reason.to_string());
+        // Set error URL here because after pipe is cancelled, stream load execution may return early.
+        // We need to set the error URL at this point to ensure error information is properly
+        // propagated to the client.
+        stream_load_ctx->error_url = get_load_error_url();
     }
 
     for (auto& tasks : _tasks) {
@@ -444,10 +449,11 @@ Status PipelineFragmentContext::_build_pipeline_tasks(const doris::TPipelineFrag
                 auto cur_task_id = _total_tasks++;
                 task_runtime_state->set_task_id(cur_task_id);
                 task_runtime_state->set_task_num(pipeline->num_tasks());
-                auto task = std::make_unique<PipelineTask>(pipeline, cur_task_id,
-                                                           task_runtime_state.get(), this,
-                                                           pipeline_id_to_profile[pip_idx].get(),
-                                                           get_local_exchange_state(pipeline), i);
+                auto task = std::make_shared<PipelineTask>(
+                        pipeline, cur_task_id, task_runtime_state.get(),
+                        std::dynamic_pointer_cast<PipelineFragmentContext>(shared_from_this()),
+                        pipeline_id_to_profile[pip_idx].get(), get_local_exchange_state(pipeline),
+                        i);
                 pipeline->incr_created_tasks(i, task.get());
                 task_runtime_state->set_task(task.get());
                 pipeline_id_to_task.insert({pipeline->id(), task.get()});
@@ -513,27 +519,28 @@ Status PipelineFragmentContext::_build_pipeline_tasks(const doris::TPipelineFrag
          target_size > _runtime_state->query_options().parallel_prepare_threshold)) {
         // If instances parallelism is big enough ( > parallel_prepare_threshold), we will prepare all tasks by multi-threads
         std::vector<Status> prepare_status(target_size);
-        std::mutex m;
-        std::condition_variable cv;
-        int prepare_done = 0;
+        int submitted_tasks = 0;
+        Status submit_status;
+        CountDownLatch latch((int)target_size);
         for (size_t i = 0; i < target_size; i++) {
-            RETURN_IF_ERROR(thread_pool->submit_func([&, i]() {
+            submit_status = thread_pool->submit_func([&, i]() {
                 SCOPED_ATTACH_TASK(_query_ctx.get());
                 prepare_status[i] = pre_and_submit(i, this);
-                std::unique_lock<std::mutex> lock(m);
-                prepare_done++;
-                if (prepare_done == target_size) {
-                    cv.notify_one();
-                }
-            }));
+                latch.count_down();
+            });
+            if (LIKELY(submit_status.ok())) {
+                submitted_tasks++;
+            } else {
+                break;
+            }
         }
-        std::unique_lock<std::mutex> lock(m);
-        if (prepare_done != target_size) {
-            cv.wait(lock);
-            for (size_t i = 0; i < target_size; i++) {
-                if (!prepare_status[i].ok()) {
-                    return prepare_status[i];
-                }
+        latch.arrive_and_wait(target_size - submitted_tasks);
+        if (UNLIKELY(!submit_status.ok())) {
+            return submit_status;
+        }
+        for (int i = 0; i < submitted_tasks; i++) {
+            if (!prepare_status[i].ok()) {
+                return prepare_status[i];
             }
         }
     } else {
@@ -1235,7 +1242,8 @@ Status PipelineFragmentContext::_create_operator(ObjectPool* pool, const TPlanNo
             return Status::InternalError("Illegal aggregate node " + std::to_string(tnode.node_id) +
                                          ": group by and output is empty");
         }
-
+        bool need_create_cache_op =
+                enable_query_cache && tnode.node_id == request.fragment.query_cache_param.node_id;
         auto create_query_cache_operator = [&](PipelinePtr& new_pipe) {
             auto cache_node_id = request.local_params[0].per_node_scan_ranges.begin()->first;
             auto cache_source_id = next_operator_id();
@@ -1269,7 +1277,7 @@ Status PipelineFragmentContext::_create_operator(ObjectPool* pool, const TPlanNo
             request.query_options.__isset.enable_distinct_streaming_aggregation &&
             request.query_options.enable_distinct_streaming_aggregation &&
             !tnode.agg_node.grouping_exprs.empty() && !group_by_limit_opt) {
-            if (enable_query_cache) {
+            if (need_create_cache_op) {
                 PipelinePtr new_pipe;
                 RETURN_IF_ERROR(create_query_cache_operator(new_pipe));
 
@@ -1293,7 +1301,7 @@ Status PipelineFragmentContext::_create_operator(ObjectPool* pool, const TPlanNo
         } else if (tnode.agg_node.__isset.use_streaming_preaggregation &&
                    tnode.agg_node.use_streaming_preaggregation &&
                    !tnode.agg_node.grouping_exprs.empty()) {
-            if (enable_query_cache) {
+            if (need_create_cache_op) {
                 PipelinePtr new_pipe;
                 RETURN_IF_ERROR(create_query_cache_operator(new_pipe));
 
@@ -1310,7 +1318,7 @@ Status PipelineFragmentContext::_create_operator(ObjectPool* pool, const TPlanNo
         } else {
             // create new pipeline to add query cache operator
             PipelinePtr new_pipe;
-            if (enable_query_cache) {
+            if (need_create_cache_op) {
                 RETURN_IF_ERROR(create_query_cache_operator(new_pipe));
             }
 
@@ -1319,7 +1327,7 @@ Status PipelineFragmentContext::_create_operator(ObjectPool* pool, const TPlanNo
             } else {
                 op.reset(new AggSourceOperatorX(pool, tnode, next_operator_id(), descs));
             }
-            if (enable_query_cache) {
+            if (need_create_cache_op) {
                 RETURN_IF_ERROR(cur_pipe->operators().front()->set_child(op));
                 RETURN_IF_ERROR(new_pipe->add_operator(
                         op, request.__isset.parallel_instances ? request.parallel_instances : 0));
@@ -1668,7 +1676,7 @@ Status PipelineFragmentContext::submit() {
     auto* scheduler = _query_ctx->get_pipe_exec_scheduler();
     for (auto& task : _tasks) {
         for (auto& t : task) {
-            st = scheduler->schedule_task(t.get());
+            st = scheduler->schedule_task(t);
             if (!st) {
                 cancel(Status::InternalError("submit context to executor fail"));
                 std::lock_guard<std::mutex> l(_task_mutex);

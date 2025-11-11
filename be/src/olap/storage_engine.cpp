@@ -20,6 +20,8 @@
 // IWYU pragma: no_include <bthread/errno.h>
 #include <fmt/format.h>
 #include <gen_cpp/AgentService_types.h>
+#include <gen_cpp/Types_types.h>
+#include <glog/logging.h>
 #include <rapidjson/document.h>
 #include <rapidjson/encodings.h>
 #include <rapidjson/prettywriter.h>
@@ -37,6 +39,7 @@
 #include <cstring>
 #include <filesystem>
 #include <iterator>
+#include <memory>
 #include <mutex>
 #include <ostream>
 #include <set>
@@ -49,6 +52,7 @@
 #include "common/config.h"
 #include "common/logging.h"
 #include "common/status.h"
+#include "gen_cpp/FrontendService.h"
 #include "gutil/strings/substitute.h"
 #include "io/fs/local_file_system.h"
 #include "olap/binlog.h"
@@ -56,7 +60,6 @@
 #include "olap/memtable_flush_executor.h"
 #include "olap/olap_common.h"
 #include "olap/olap_define.h"
-#include "olap/olap_meta.h"
 #include "olap/rowset/rowset_fwd.h"
 #include "olap/rowset/rowset_meta.h"
 #include "olap/rowset/rowset_meta_manager.h"
@@ -68,16 +71,18 @@
 #include "olap/tablet_meta.h"
 #include "olap/tablet_meta_manager.h"
 #include "olap/txn_manager.h"
+#include "runtime/client_cache.h"
 #include "runtime/stream_load/stream_load_recorder.h"
 #include "util/doris_metrics.h"
 #include "util/mem_info.h"
 #include "util/metrics.h"
-#include "util/spinlock.h"
 #include "util/stopwatch.hpp"
 #include "util/thread.h"
 #include "util/threadpool.h"
+#include "util/thrift_rpc_helper.h"
 #include "util/uid_util.h"
 #include "util/work_thread_pool.hpp"
+#include "vec/common/assert_cast.h"
 
 using std::filesystem::directory_iterator;
 using std::filesystem::path;
@@ -300,7 +305,7 @@ Status StorageEngine::_open() {
 
 Status StorageEngine::_init_store_map() {
     std::vector<std::thread> threads;
-    SpinLock error_msg_lock;
+    std::mutex error_msg_lock;
     std::string error_msg;
     for (auto& path : _options.store_paths) {
         auto store = std::make_unique<DataDir>(*this, path.path, path.capacity_bytes,
@@ -309,7 +314,7 @@ Status StorageEngine::_init_store_map() {
             auto st = store->init();
             if (!st.ok()) {
                 {
-                    std::lock_guard<SpinLock> l(error_msg_lock);
+                    std::lock_guard<std::mutex> l(error_msg_lock);
                     error_msg.append(st.to_string() + ";");
                 }
                 LOG(WARNING) << "Store load failed, status=" << st.to_string()
@@ -946,14 +951,27 @@ void StorageEngine::_clean_unused_rowset_metas() {
     for (auto data_dir : data_dirs) {
         static_cast<void>(
                 RowsetMetaManager::traverse_rowset_metas(data_dir->get_meta(), clean_rowset_func));
+        // 1. delete delete_bitmap
+        std::set<int64_t> tablets_to_save_meta;
+        for (auto& rowset_meta : invalid_rowset_metas) {
+            TabletSharedPtr tablet = _tablet_manager->get_tablet(rowset_meta->tablet_id());
+            if (tablet && tablet->tablet_meta()->enable_unique_key_merge_on_write()) {
+                tablet->tablet_meta()->remove_rowset_delete_bitmap(rowset_meta->rowset_id(),
+                                                                   rowset_meta->version());
+                tablets_to_save_meta.emplace(tablet->tablet_id());
+            }
+        }
+        for (const auto& tablet_id : tablets_to_save_meta) {
+            auto tablet = _tablet_manager->get_tablet(tablet_id);
+            if (tablet) {
+                std::shared_lock rlock(tablet->get_header_lock());
+                tablet->save_meta();
+            }
+        }
+        // 2. delete rowset meta
         for (auto& rowset_meta : invalid_rowset_metas) {
             static_cast<void>(RowsetMetaManager::remove(
                     data_dir->get_meta(), rowset_meta->tablet_uid(), rowset_meta->rowset_id()));
-            TabletSharedPtr tablet = _tablet_manager->get_tablet(rowset_meta->tablet_id());
-            if (tablet && tablet->tablet_meta()->enable_unique_key_merge_on_write()) {
-                tablet->tablet_meta()->delete_bitmap().remove_rowset_cache_version(
-                        rowset_meta->rowset_id());
-            }
         }
         LOG(INFO) << "remove " << invalid_rowset_metas.size()
                   << " invalid rowset meta from dir: " << data_dir->path();
@@ -1188,6 +1206,7 @@ void StorageEngine::_parse_default_rowset_type() {
 }
 
 void StorageEngine::start_delete_unused_rowset() {
+    DBUG_EXECUTE_IF("StorageEngine::start_delete_unused_rowset.block", DBUG_BLOCK);
     LOG(INFO) << "start to delete unused rowset, size: " << _unused_rowsets.size();
     std::vector<RowsetSharedPtr> unused_rowsets_copy;
     unused_rowsets_copy.reserve(_unused_rowsets.size());
@@ -1220,19 +1239,26 @@ void StorageEngine::start_delete_unused_rowset() {
               << due_to_use_count << " rowsets due to use count > 1, skipped "
               << due_to_not_delete_file << " rowsets due to don't need to delete file, skipped "
               << due_to_delayed_expired_ts << " rowsets due to delayed expired timestamp.";
+    std::set<int64_t> tablets_to_save_meta;
     for (auto&& rs : unused_rowsets_copy) {
         VLOG_NOTICE << "start to remove rowset:" << rs->rowset_id()
                     << ", version:" << rs->version();
         // delete delete_bitmap of unused rowsets
         if (auto tablet = _tablet_manager->get_tablet(rs->rowset_meta()->tablet_id());
             tablet && tablet->enable_unique_key_merge_on_write()) {
-            tablet->tablet_meta()->delete_bitmap().remove({rs->rowset_id(), 0, 0},
-                                                          {rs->rowset_id(), UINT32_MAX, 0});
-            tablet->tablet_meta()->delete_bitmap().remove_rowset_cache_version(rs->rowset_id());
+            tablet->tablet_meta()->remove_rowset_delete_bitmap(rs->rowset_id(), rs->version());
+            tablets_to_save_meta.emplace(tablet->tablet_id());
         }
         Status status = rs->remove();
         unused_rowsets_counter << -1;
         VLOG_NOTICE << "remove rowset:" << rs->rowset_id() << " finished. status:" << status;
+    }
+    for (const auto& tablet_id : tablets_to_save_meta) {
+        auto tablet = _tablet_manager->get_tablet(tablet_id);
+        if (tablet) {
+            std::shared_lock rlock(tablet->get_header_lock());
+            tablet->save_meta();
+        }
     }
     LOG(INFO) << "removed all collected unused rowsets";
 }
@@ -1268,7 +1294,8 @@ Status StorageEngine::create_tablet(const TCreateTabletReq& request, RuntimeProf
     return _tablet_manager->create_tablet(request, stores, profile);
 }
 
-Result<BaseTabletSPtr> StorageEngine::get_tablet(int64_t tablet_id, SyncRowsetStats* sync_stats) {
+Result<BaseTabletSPtr> StorageEngine::get_tablet(int64_t tablet_id, SyncRowsetStats* sync_stats,
+                                                 bool force_use_cache) {
     BaseTabletSPtr tablet;
     std::string err;
     tablet = _tablet_manager->get_tablet(tablet_id, true, &err);
@@ -1436,6 +1463,84 @@ bool StorageEngine::get_peer_replica_info(int64_t tablet_id, TReplicaInfo* repli
     return false;
 }
 
+bool StorageEngine::get_peers_replica_backends(int64_t tablet_id, std::vector<TBackend>* backends) {
+    TabletSharedPtr tablet = _tablet_manager->get_tablet(tablet_id);
+    if (tablet == nullptr) {
+        LOG(WARNING) << "tablet is no longer exist: tablet_id=" << tablet_id;
+        return false;
+    }
+    int64_t cur_time = UnixMillis();
+    if (cur_time - _last_get_peers_replica_backends_time_ms < 10000) {
+        LOG_WARNING("failed to get peers replica backens.")
+                .tag("tablet_id", tablet_id)
+                .tag("last time", _last_get_peers_replica_backends_time_ms)
+                .tag("cur time", cur_time);
+        return false;
+    }
+    LOG_INFO("start get peers replica backends info.").tag("tablet id", tablet_id);
+    ClusterInfo* cluster_info = ExecEnv::GetInstance()->cluster_info();
+    if (cluster_info == nullptr) {
+        LOG(WARNING) << "Have not get FE Master heartbeat yet";
+        return false;
+    }
+    TNetworkAddress master_addr = cluster_info->master_fe_addr;
+    if (master_addr.hostname.empty() || master_addr.port == 0) {
+        LOG(WARNING) << "Have not get FE Master heartbeat yet";
+        return false;
+    }
+    TGetTabletReplicaInfosRequest request;
+    TGetTabletReplicaInfosResult result;
+    request.tablet_ids.emplace_back(tablet_id);
+    Status rpc_st = ThriftRpcHelper::rpc<FrontendServiceClient>(
+            master_addr.hostname, master_addr.port,
+            [&request, &result](FrontendServiceConnection& client) {
+                client->getTabletReplicaInfos(result, request);
+            });
+
+    if (!rpc_st.ok()) {
+        LOG(WARNING) << "Failed to get tablet replica infos, encounter rpc failure, "
+                        "tablet id: "
+                     << tablet_id;
+        return false;
+    }
+    std::unique_lock<std::mutex> lock(_peer_replica_infos_mutex);
+    if (result.tablet_replica_infos.contains(tablet_id)) {
+        std::vector<TReplicaInfo> reps = result.tablet_replica_infos[tablet_id];
+        if (reps.empty()) [[unlikely]] {
+            VLOG_DEBUG << "get_peers_replica_backends reps is empty, maybe this tablet is in "
+                          "schema change. Go to FE to see more info. Tablet id: "
+                       << tablet_id;
+        }
+        for (const auto& rep : reps) {
+            if (rep.replica_id != tablet->replica_id()) {
+                TBackend backend;
+                backend.__set_host(rep.host);
+                backend.__set_be_port(rep.be_port);
+                backend.__set_http_port(rep.http_port);
+                backend.__set_brpc_port(rep.brpc_port);
+                if (rep.__isset.is_alive) {
+                    backend.__set_is_alive(rep.is_alive);
+                }
+                if (rep.__isset.backend_id) {
+                    backend.__set_id(rep.backend_id);
+                }
+                backends->emplace_back(backend);
+                std::stringstream backend_string;
+                backend.printTo(backend_string);
+                LOG_INFO("get 1 peer replica backend info.")
+                        .tag("tablet id", tablet_id)
+                        .tag("backend info", backend_string.str());
+            }
+        }
+        _last_get_peers_replica_backends_time_ms = UnixMillis();
+        LOG_INFO("succeed get peers replica backends info.")
+                .tag("tablet id", tablet_id)
+                .tag("replica num", backends->size());
+        return true;
+    }
+    return false;
+}
+
 bool StorageEngine::should_fetch_from_peer(int64_t tablet_id) {
 #ifdef BE_TEST
     if (tablet_id % 2 == 0) {
@@ -1499,6 +1604,24 @@ void BaseStorageEngine::_evict_querying_rowset() {
     }
 }
 
+bool BaseStorageEngine::_should_delay_large_task() {
+    DCHECK_GE(_cumu_compaction_thread_pool->max_threads(),
+              _cumu_compaction_thread_pool_used_threads);
+    DCHECK_GE(_cumu_compaction_thread_pool_small_tasks_running, 0);
+    // Case 1: Multiple threads available => accept large task
+    if (_cumu_compaction_thread_pool->max_threads() - _cumu_compaction_thread_pool_used_threads >
+        0) {
+        return false; // No delay needed
+    }
+    // Case 2: Only one thread left => accept large task only if another small task is already running
+    if (_cumu_compaction_thread_pool_small_tasks_running > 0) {
+        return false; // No delay needed
+    }
+    // Case 3: Only one thread left, this is a large task, and no small tasks are running
+    // Delay this task to reserve capacity for potential small tasks
+    return true; // Delay this large task
+}
+
 bool StorageEngine::add_broken_path(std::string path) {
     std::lock_guard<std::mutex> lock(_broken_paths_mutex);
     auto success = _broken_paths.emplace(path).second;
@@ -1529,6 +1652,36 @@ Status StorageEngine::_persist_broken_paths() {
         return st;
     }
 
+    return Status::OK();
+}
+
+Status StorageEngine::submit_clone_task(Tablet* tablet, int64_t version) {
+    std::vector<TBackend> backends;
+    if (!get_peers_replica_backends(tablet->tablet_id(), &backends)) {
+        return Status::Error<ErrorCode::INTERNAL_ERROR, false>(
+                "get_peers_replica_backends failed.");
+    }
+    TAgentTaskRequest task;
+    TCloneReq req;
+    req.__set_tablet_id(tablet->tablet_id());
+    req.__set_schema_hash(tablet->schema_hash());
+    req.__set_src_backends(backends);
+    req.__set_version(version);
+    req.__set_replica_id(tablet->replica_id());
+    req.__set_partition_id(tablet->partition_id());
+    req.__set_table_id(tablet->table_id());
+    task.__set_task_type(TTaskType::CLONE);
+    task.__set_clone_req(req);
+    task.__set_priority(TPriority::HIGH);
+    task.__set_signature(tablet->tablet_id());
+    LOG_INFO("BE start to submit missing rowset clone task.")
+            .tag("tablet_id", tablet->tablet_id())
+            .tag("version", version)
+            .tag("replica_id", tablet->replica_id())
+            .tag("partition_id", tablet->partition_id())
+            .tag("table_id", tablet->table_id());
+    RETURN_IF_ERROR(assert_cast<PriorTaskWorkerPool*>(workers->at(TTaskType::CLONE).get())
+                            ->submit_high_prior_and_cancel_low(task));
     return Status::OK();
 }
 

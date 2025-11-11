@@ -19,10 +19,8 @@
 
 #include <fmt/format.h>
 
-#include <filesystem>
 #include <ostream>
 #include <string>
-#include <utility>
 
 #include "common/compiler_util.h" // IWYU pragma: keep
 #include "common/config.h"
@@ -40,8 +38,6 @@
 #include "olap/storage_engine.h"
 #include "olap/tablet_schema.h"
 #include "runtime/exec_env.h"
-#include "runtime/memory/mem_tracker.h"
-#include "service/backend_options.h"
 #include "util/mem_info.h"
 #include "util/stopwatch.hpp"
 #include "vec/core/block.h"
@@ -65,7 +61,7 @@ MemTableWriter::~MemTableWriter() {
 Status MemTableWriter::init(std::shared_ptr<RowsetWriter> rowset_writer,
                             TabletSchemaSPtr tablet_schema,
                             std::shared_ptr<PartialUpdateInfo> partial_update_info,
-                            ThreadPool* wg_flush_pool_ptr, bool unique_key_mow) {
+                            std::shared_ptr<WorkloadGroup> wg_sptr, bool unique_key_mow) {
     _rowset_writer = rowset_writer;
     _tablet_schema = tablet_schema;
     _unique_key_mow = unique_key_mow;
@@ -77,19 +73,9 @@ Status MemTableWriter::init(std::shared_ptr<RowsetWriter> rowset_writer,
     // create flush handler
     // by assigning segment_id to memtable before submiting to flush executor,
     // we can make sure same keys sort in the same order in all replicas.
-    if (wg_flush_pool_ptr) {
-        RETURN_IF_ERROR(
-                ExecEnv::GetInstance()
-                        ->storage_engine()
-                        .memtable_flush_executor()
-                        ->create_flush_token(_flush_token, _rowset_writer, wg_flush_pool_ptr));
-    } else {
-        RETURN_IF_ERROR(
-                ExecEnv::GetInstance()
-                        ->storage_engine()
-                        .memtable_flush_executor()
-                        ->create_flush_token(_flush_token, _rowset_writer, _req.is_high_priority));
-    }
+    RETURN_IF_ERROR(
+            ExecEnv::GetInstance()->storage_engine().memtable_flush_executor()->create_flush_token(
+                    _flush_token, _rowset_writer, _req.is_high_priority, wg_sptr));
 
     _is_init = true;
     return Status::OK();
@@ -152,12 +138,12 @@ Status MemTableWriter::_flush_memtable_async() {
     DCHECK(_flush_token != nullptr);
     std::shared_ptr<MemTable> memtable;
     {
-        std::lock_guard<SpinLock> l(_mem_table_ptr_lock);
+        std::lock_guard<std::mutex> l(_mem_table_ptr_lock);
         memtable = _mem_table;
         _mem_table = nullptr;
     }
     {
-        std::lock_guard<SpinLock> l(_mem_table_ptr_lock);
+        std::lock_guard<std::mutex> l(_mem_table_ptr_lock);
         memtable->update_mem_type(MemType::WRITE_FINISHED);
         _freezed_mem_tables.push_back(memtable);
     }
@@ -211,7 +197,7 @@ Status MemTableWriter::wait_flush() {
 
 void MemTableWriter::_reset_mem_table() {
     {
-        std::lock_guard<SpinLock> l(_mem_table_ptr_lock);
+        std::lock_guard<std::mutex> l(_mem_table_ptr_lock);
         _mem_table.reset(new MemTable(_req.tablet_id, _tablet_schema, _req.slots, _req.tuple_desc,
                                       _unique_key_mow, _partial_update_info.get()));
     }
@@ -237,7 +223,7 @@ Status MemTableWriter::close() {
 
     auto s = _flush_memtable_async();
     {
-        std::lock_guard<SpinLock> l(_mem_table_ptr_lock);
+        std::lock_guard<std::mutex> l(_mem_table_ptr_lock);
         _mem_table.reset();
     }
     _is_closed = true;
@@ -336,7 +322,7 @@ Status MemTableWriter::cancel_with_status(const Status& st) {
         return Status::OK();
     }
     {
-        std::lock_guard<SpinLock> l(_mem_table_ptr_lock);
+        std::lock_guard<std::mutex> l(_mem_table_ptr_lock);
         _mem_table.reset();
     }
     if (_flush_token != nullptr) {
@@ -364,7 +350,7 @@ int64_t MemTableWriter::mem_consumption(MemType mem) {
     }
     int64_t mem_usage = 0;
     {
-        std::lock_guard<SpinLock> l(_mem_table_ptr_lock);
+        std::lock_guard<std::mutex> l(_mem_table_ptr_lock);
         for (const auto& mem_table : _freezed_mem_tables) {
             auto mem_table_sptr = mem_table.lock();
             if (mem_table_sptr != nullptr && mem_table_sptr->get_mem_type() == mem) {
@@ -376,7 +362,7 @@ int64_t MemTableWriter::mem_consumption(MemType mem) {
 }
 
 int64_t MemTableWriter::active_memtable_mem_consumption() {
-    std::lock_guard<SpinLock> l(_mem_table_ptr_lock);
+    std::lock_guard<std::mutex> l(_mem_table_ptr_lock);
     return _mem_table != nullptr ? _mem_table->memory_usage() : 0;
 }
 

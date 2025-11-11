@@ -258,6 +258,8 @@ Status IndexBuilder::update_inverted_index_info() {
         rowset_meta->set_rowset_state(input_rowset_meta->rowset_state());
         std::vector<KeyBoundsPB> key_bounds;
         RETURN_IF_ERROR(input_rowset->get_segments_key_bounds(&key_bounds));
+        rowset_meta->set_segments_key_bounds_truncated(
+                input_rowset_meta->is_segments_key_bounds_truncated());
         rowset_meta->set_segments_key_bounds(key_bounds);
         auto output_rowset = output_rs_writer->manual_build(rowset_meta);
         if (input_rowset_meta->has_delete_predicate()) {
@@ -399,7 +401,8 @@ Status IndexBuilder::handle_single_rowset(RowsetMetaSharedPtr output_rowset_meta
                 auto column_name = inverted_index.columns[0];
                 auto column_idx = output_rowset_schema->field_index(column_name);
                 if (column_idx < 0) {
-                    if (!inverted_index.column_unique_ids.empty()) {
+                    if (inverted_index.__isset.column_unique_ids &&
+                        !inverted_index.column_unique_ids.empty()) {
                         column_idx = output_rowset_schema->field_index(
                                 inverted_index.column_unique_ids[0]);
                     }
@@ -819,7 +822,7 @@ Status IndexBuilder::modify_rowsets(const Merger::Statistics* stats) {
         for (auto i = 0; i < _input_rowsets.size(); ++i) {
             RowsetId input_rowset_id = _input_rowsets[i]->rowset_id();
             RowsetId output_rowset_id = _output_rowsets[i]->rowset_id();
-            for (const auto& [k, v] : _tablet->tablet_meta()->delete_bitmap().delete_bitmap) {
+            for (const auto& [k, v] : _tablet->tablet_meta()->delete_bitmap()->delete_bitmap) {
                 RowsetId rs_id = std::get<0>(k);
                 if (rs_id == input_rowset_id) {
                     DeleteBitmap::BitmapKey output_rs_key = {output_rowset_id, std::get<1>(k),
@@ -829,7 +832,7 @@ Status IndexBuilder::modify_rowsets(const Merger::Statistics* stats) {
                 }
             }
         }
-        _tablet->tablet_meta()->delete_bitmap().merge(*delete_bitmap);
+        _tablet->tablet_meta()->delete_bitmap()->merge(*delete_bitmap);
 
         // modify_rowsets will remove the delete_bitmap for input rowsets,
         // should call it after merge delete_bitmap

@@ -154,6 +154,7 @@ import org.apache.doris.catalog.TabletMeta;
 import org.apache.doris.catalog.View;
 import org.apache.doris.clone.DynamicPartitionScheduler;
 import org.apache.doris.cloud.catalog.CloudEnv;
+import org.apache.doris.cloud.catalog.ComputeGroup;
 import org.apache.doris.cloud.datasource.CloudInternalCatalog;
 import org.apache.doris.cloud.load.CloudLoadManager;
 import org.apache.doris.cloud.proto.Cloud;
@@ -593,7 +594,7 @@ public class ShowExecutor {
     private void handleShowEngines() {
         ShowEnginesStmt showStmt = (ShowEnginesStmt) stmt;
         List<List<String>> rowSet = Lists.newArrayList();
-        rowSet.add(Lists.newArrayList("Olap engine", "YES", "Default storage engine of palo", "NO", "NO", "NO"));
+        rowSet.add(Lists.newArrayList("Olap engine", "YES", "Default storage engine of Doris", "NO", "NO", "NO"));
         rowSet.add(Lists.newArrayList("MySQL", "YES", "MySQL server which data is in it", "NO", "NO", "NO"));
         rowSet.add(Lists.newArrayList("ELASTICSEARCH", "YES", "ELASTICSEARCH cluster which data is in it",
                 "NO", "NO", "NO"));
@@ -803,8 +804,14 @@ public class ShowExecutor {
         final ShowClusterStmt showStmt = (ShowClusterStmt) stmt;
         final List<List<String>> rows = Lists.newArrayList();
         List<String> clusterNames = null;
-        clusterNames = ((CloudSystemInfoService) Env.getCurrentSystemInfo()).getCloudClusterNames();
+        CloudSystemInfoService cloudSys = ((CloudSystemInfoService) Env.getCurrentSystemInfo());
+        clusterNames = cloudSys.getCloudClusterNames();
+        // virtual cluster info
+        List<ComputeGroup> virtualComputeGroup = cloudSys.getComputeGroups(true);
+        List<String> virtualComputeGroupNames = virtualComputeGroup.stream()
+                .map(ComputeGroup::getName).collect(Collectors.toList());
 
+        clusterNames.addAll(virtualComputeGroupNames);
         final Set<String> clusterNameSet = Sets.newTreeSet();
         clusterNameSet.addAll(clusterNames);
 
@@ -836,10 +843,35 @@ public class ShowExecutor {
 
             String result = Joiner.on(", ").join(users);
             row.add(result);
-            int backendNum = ((CloudSystemInfoService) Env.getCurrentEnv().getCurrentSystemInfo())
-                    .getBackendsByClusterName(clusterName).size();
-            row.add(String.valueOf(backendNum));
+
+            // subClusters
+            String subClusterNames = "";
+            // Policy
+            String policy = "";
+            if (!virtualComputeGroupNames.contains(clusterName)) {
+                int backendNum = cloudSys.getBackendsByClusterName(clusterName).size();
+                row.add(String.valueOf(backendNum));
+                rows.add(row);
+                row.add(subClusterNames);
+                row.add(policy);
+                continue;
+            }
+            // virtual compute group
+            // virtual cg backends eq 0
+            row.add(String.valueOf(0));
             rows.add(row);
+            ComputeGroup cg = cloudSys.getComputeGroupByName(clusterName);
+            if (cg == null) {
+                continue;
+            }
+            String activeCluster = cg.getPolicy().getActiveComputeGroup();
+            String standbyCluster = cg.getPolicy().getStandbyComputeGroup();
+            // first active, second standby
+            subClusterNames = Joiner.on(", ").join(activeCluster, standbyCluster);
+            row.add(subClusterNames);
+
+            // Policy
+            row.add(cg.getPolicy().toString());
         }
 
         resultSet = new ShowResultSet(showStmt.getMetaData(), rows);
@@ -1156,7 +1188,7 @@ public class ShowExecutor {
         try {
             if (table.getType() == TableType.HMS_EXTERNAL_TABLE) {
                 rows.add(Arrays.asList(table.getName(),
-                        HiveMetaStoreClientHelper.showCreateTable(((HMSExternalTable) table).getRemoteTable())));
+                        HiveMetaStoreClientHelper.showCreateTable((HMSExternalTable) table)));
                 resultSet = new ShowResultSet(showStmt.getMetaData(), rows);
                 return;
             }
@@ -1655,6 +1687,7 @@ public class ShowExecutor {
         List<List<String>> rows = Lists.newArrayList();
         try {
             URLConnection urlConnection = url.openConnection();
+            urlConnection.setRequestProperty("Auth-Token", Env.getCurrentEnv().getTokenManager().acquireToken());
             InputStream inputStream = urlConnection.getInputStream();
             try (BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream))) {
                 int limit = 100;
@@ -2262,8 +2295,13 @@ public class ShowExecutor {
         resultSet = new ShowResultSet(showExportStmt.getMetaData(), infos);
     }
 
-    private void handleShowBackends() {
+    private void handleShowBackends() throws AnalysisException {
         final ShowBackendsStmt showStmt = (ShowBackendsStmt) stmt;
+        try {
+            showStmt.analyze(null);
+        } catch (Exception e) {
+            throw (AnalysisException) e;
+        }
         List<List<String>> backendInfos = BackendsProcDir.getBackendInfos();
 
         backendInfos.sort(new Comparator<List<String>>() {
@@ -2276,8 +2314,13 @@ public class ShowExecutor {
         resultSet = new ShowResultSet(showStmt.getMetaData(), backendInfos);
     }
 
-    private void handleShowFrontends() {
+    private void handleShowFrontends() throws AnalysisException {
         final ShowFrontendsStmt showStmt = (ShowFrontendsStmt) stmt;
+        try {
+            showStmt.analyze(null);
+        } catch (Exception e) {
+            throw (AnalysisException) e;
+        }
 
         List<List<String>> infos = Lists.newArrayList();
         FrontendsProcNode.getFrontendsInfo(Env.getCurrentEnv(), showStmt.getDetailType(), infos);
@@ -2466,6 +2509,7 @@ public class ShowExecutor {
             try {
                 URL url = new URL(urlString);
                 URLConnection urlConnection = url.openConnection();
+                urlConnection.setRequestProperty("Auth-Token", Env.getCurrentEnv().getTokenManager().acquireToken());
                 InputStream inputStream = urlConnection.getInputStream();
                 BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream));
                 while (reader.ready()) {

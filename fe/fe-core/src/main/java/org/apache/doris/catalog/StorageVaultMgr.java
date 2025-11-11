@@ -151,8 +151,8 @@ public class StorageVaultMgr {
         Cloud.StorageVaultPB.Builder alterObjVaultBuilder = Cloud.StorageVaultPB.newBuilder();
         alterObjVaultBuilder.setName(name);
         alterObjVaultBuilder.setObjInfo(objBuilder.build());
-        if (properties.containsKey(StorageVault.VAULT_NAME)) {
-            alterObjVaultBuilder.setAlterName(properties.get(StorageVault.VAULT_NAME));
+        if (properties.containsKey(StorageVault.PropertyKey.VAULT_NAME)) {
+            alterObjVaultBuilder.setAlterName(properties.get(StorageVault.PropertyKey.VAULT_NAME));
         }
         return alterObjVaultBuilder;
     }
@@ -163,8 +163,8 @@ public class StorageVaultMgr {
         Cloud.StorageVaultPB.Builder alterHdfsInfoBuilder = Cloud.StorageVaultPB.newBuilder();
         alterHdfsInfoBuilder.setName(name);
         alterHdfsInfoBuilder.setHdfsInfo(hdfsInfos);
-        if (properties.containsKey(StorageVault.VAULT_NAME)) {
-            alterHdfsInfoBuilder.setAlterName(properties.get(StorageVault.VAULT_NAME));
+        if (properties.containsKey(StorageVault.PropertyKey.VAULT_NAME)) {
+            alterHdfsInfoBuilder.setAlterName(properties.get(StorageVault.PropertyKey.VAULT_NAME));
         }
         return alterHdfsInfoBuilder;
     }
@@ -208,7 +208,7 @@ public class StorageVaultMgr {
                 request.setOp(Operation.ALTER_S3_VAULT);
             } else if (type == StorageVaultType.HDFS) {
                 properties.keySet().stream()
-                        .filter(key -> HdfsStorageVault.FORBID_CHECK_PROPERTIES.contains(key)
+                        .filter(key -> HdfsStorageVault.FORBID_ALTER_PROPERTIES.contains(key)
                                 || key.toLowerCase().contains(S3Properties.S3_PREFIX)
                                 || key.toLowerCase().contains(S3Properties.PROVIDER))
                         .findAny()
@@ -294,6 +294,27 @@ public class StorageVaultMgr {
             return defaultVaultInfo;
         } finally {
             rwLock.readLock().unlock();
+        }
+    }
+
+    public StorageVaultType getStorageVaultTypeByName(String vaultName) throws DdlException {
+        try {
+            Cloud.GetObjStoreInfoResponse resp = MetaServiceProxy.getInstance()
+                    .getObjStoreInfo(Cloud.GetObjStoreInfoRequest.newBuilder().build());
+
+            for (Cloud.StorageVaultPB vault : resp.getStorageVaultList()) {
+                if (vault.getName().equals(vaultName)) {
+                    if (vault.hasHdfsInfo()) {
+                        return StorageVaultType.HDFS;
+                    } else if (vault.hasObjInfo()) {
+                        return StorageVaultType.S3;
+                    }
+                }
+            }
+            return StorageVaultType.UNKNOWN;
+        } catch (RpcException e) {
+            LOG.warn("failed to get storage vault type due to RpcException: {}", e);
+            throw new DdlException(e.getMessage());
         }
     }
 

@@ -15,16 +15,6 @@
 // specific language governing permissions and limitations
 // under the License.
 
-def getMetrics = { ip, port ->
-        def dst = 'http://' + ip + ':' + port
-        def conn = new URL(dst + "/metrics").openConnection()
-        conn.setRequestMethod("GET")
-        def encoding = Base64.getEncoder().encodeToString((context.config.feHttpUser + ":" + 
-                (context.config.feHttpPassword == null ? "" : context.config.feHttpPassword)).getBytes("UTF-8"))
-        conn.setRequestProperty("Authorization", "Basic ${encoding}")
-        return conn.getInputStream().getText()
-    }
-
 suite("test_crud_wlg") {
     def table_name = "wlg_test_table"
     def table_name2 = "wlg_test_table2"
@@ -148,13 +138,6 @@ suite("test_crud_wlg") {
     sql "drop workload group test_drop_wg"
     qt_show_del_wg_2 "select name,cpu_share,memory_limit,enable_memory_overcommit,max_concurrency,max_queue_size,queue_timeout,cpu_hard_limit,scan_thread_num,tag from information_schema.workload_groups where name in ('normal','test_group','test_drop_wg') order by name;"
 
-    // test memory_limit
-    test {
-        sql "alter workload group test_group properties ( 'memory_limit'='100%' );"
-
-        exception "cannot be greater than"
-    }
-
     sql "alter workload group test_group properties ( 'memory_limit'='11%' );"
     qt_mem_limit_1 """ select count(1) from ${table_name} """
     qt_mem_limit_2 "select name,cpu_share,memory_limit,enable_memory_overcommit,max_concurrency,max_queue_size,queue_timeout,cpu_hard_limit,scan_thread_num from information_schema.workload_groups where name in ('normal','test_group') order by name;"
@@ -180,12 +163,6 @@ suite("test_crud_wlg") {
     }
 
     sql "alter workload group test_group properties ( 'cpu_hard_limit'='99%' );"
-
-    test {
-        sql "alter workload group normal properties ( 'cpu_hard_limit'='2%' );"
-
-        exception "can not be greater than 100%"
-    }
 
     sql "alter workload group test_group properties ( 'cpu_hard_limit'='20%' );"
     qt_cpu_hard_limit_1 """ select count(1) from ${table_name} """
@@ -249,30 +226,6 @@ suite("test_crud_wlg") {
         exception "The allowed cpu_share value is -1 or a positive integer"
     }
 
-    // failed for mem_limit
-    test {
-        sql "create workload group if not exists test_group2 " +
-                "properties ( " +
-                "    'cpu_share'='10', " +
-                "    'memory_limit'='200%', " +
-                "    'enable_memory_overcommit'='true' " +
-                ");"
-
-        exception "cannot be greater than"
-    }
-
-    test {
-        sql "create workload group if not exists test_group2 " +
-                "properties ( " +
-                "    'cpu_share'='10', " +
-                "    'memory_limit'='99%', " +
-                "    'enable_memory_overcommit'='true' " +
-                ");"
-
-        exception "cannot be greater than"
-    }
-
-
     // failed for mem_overcommit
     test {
         sql "create workload group if not exists test_group2 " +
@@ -297,18 +250,6 @@ suite("test_crud_wlg") {
                 ");"
 
         exception "a positive integer between 1 and 100"
-    }
-
-    test {
-        sql "create workload group if not exists test_group2 " +
-                "properties ( " +
-                "    'cpu_share'='10', " +
-                "    'memory_limit'='3%', " +
-                "    'enable_memory_overcommit'='true', " +
-                " 'cpu_hard_limit'='99%' " +
-                ");"
-
-        exception "can not be greater than 100%"
     }
 
     // test show workload groups
@@ -517,27 +458,14 @@ suite("test_crud_wlg") {
 
     sql "create workload group if not exists tag1_wg1 properties (  'cpu_hard_limit'='10%', 'tag'='tag1');"
 
-    test {
-        sql "create workload group if not exists tag1_wg2 properties (  'cpu_hard_limit'='91%', 'tag'='tag1');"
-        exception "can not be greater than 100%"
-    }
-
     sql "create workload group if not exists tag1_wg2 properties (  'cpu_hard_limit'='10%', 'tag'='tag1');"
 
     sql "create workload group if not exists tag2_wg1 properties (  'cpu_hard_limit'='91%', 'tag'='tag2');"
 
-    test {
-        sql "alter workload group tag2_wg1 properties ( 'tag'='tag1' );"
-        exception "can not be greater than 100% "
-    }
 
     sql "alter workload group tag2_wg1 properties ( 'cpu_hard_limit'='10%' );"
     sql "alter workload group tag2_wg1 properties ( 'tag'='tag1' );"
 
-    test {
-        sql "create workload group if not exists tag1_wg3 properties (  'cpu_hard_limit'='80%', 'tag'='tag1');"
-        exception "can not be greater than 100% "
-    }
 
     sql "drop workload group tag2_wg1;"
     sql "create workload group if not exists tag1_wg3 properties (  'cpu_hard_limit'='80%', 'tag'='tag1');"
@@ -545,30 +473,15 @@ suite("test_crud_wlg") {
     // test workload group's tag property, memory_limit
     sql "create workload group if not exists tag1_mem_wg1 properties (  'memory_limit'='50%', 'tag'='mem_tag1');"
 
-    test {
-        sql "create workload group if not exists tag1_mem_wg2 properties (  'memory_limit'='60%', 'tag'='mem_tag1');"
-        exception "cannot be greater than 100.0%"
-    }
-
     sql "create workload group if not exists tag1_mem_wg2 properties ('memory_limit'='49%', 'tag'='mem_tag1');"
 
     sql "create workload group if not exists tag1_mem_wg3 properties (  'memory_limit'='2%');"
-
-    test {
-        sql "alter workload group tag1_mem_wg3 properties ( 'tag'='mem_tag1' );"
-        exception "cannot be greater than 100.0%"
-    }
 
     sql "alter workload group tag1_mem_wg3 properties ( 'memory_limit'='1%' );"
 
     sql "alter workload group tag1_mem_wg3 properties ( 'tag'='mem_tag1' );"
 
     sql "create workload group tag1_mem_wg4 properties('memory_limit'='-1','tag'='mem_tag1');"
-
-    test {
-        sql "alter workload group tag1_mem_wg4 properties ( 'memory_limit'='1%' );"
-        exception "cannot be greater than 100.0%"
-    }
 
 
     qt_show_wg_tag "select name,MEMORY_LIMIT,CPU_HARD_LIMIT,TAG from information_schema.workload_groups where name in('tag1_wg1','tag1_wg2','tag2_wg1','tag1_wg3','tag1_mem_wg1','tag1_mem_wg2','tag1_mem_wg3') order by tag,name;"
@@ -768,50 +681,4 @@ suite("test_crud_wlg") {
 
     sql "drop workload group if exists default_val_wg"
 
-    for (int i = 0; i < 20; i++) {
-        // 1. SHOW BACKENDS get be ip and http port
-        Map<String, String> backendId_to_backendIP = new HashMap<>();
-        Map<String, String> backendId_to_backendHttpPort = new HashMap<>();
-        getBackendIpHttpPort(backendId_to_backendIP, backendId_to_backendHttpPort);
-        // Print above maps in logger.
-        logger.info("backendId_to_backendIP: " + backendId_to_backendIP);
-        logger.info("backendId_to_backendHttpPort: " + backendId_to_backendHttpPort);
-
-        // 2. CREATE WORKLOAD GROUP
-        sql "drop workload group if exists test_wg_metrics;"
-        sql "create workload group if not exists test_wg_metrics " +
-                "properties ( " +
-                "    'cpu_share'='10', " +
-                "    'memory_limit'='10%', " +
-                "    'enable_memory_overcommit'='true' " +
-                ");"
-        sql "set workload_group=test_wg_metrics;"
-        wg = sql("select name,cpu_share,memory_limit,enable_memory_overcommit,max_concurrency,max_queue_size,queue_timeout,cpu_hard_limit,scan_thread_num,tag,read_bytes_per_second,remote_read_bytes_per_second from information_schema.workload_groups where name = 'test_wg_metrics' order by name;");
-        logger.info("wg: " + wg);
-
-        // 3. EXECUTE A QUERY SO THAT THE WORKLOAD GROUP IS USED
-        sql "select count(*) from numbers(\"number\"=\"100\");"
-        
-        // curl backend http port to get metrics
-        // get first backendId
-        backendId = backendId_to_backendIP.keySet().iterator().next();
-        backendIP = backendId_to_backendIP.get(backendId);
-        backendHttpPort = backendId_to_backendHttpPort.get(backendId);
-        logger.info("backendId: " + backendId + ", backendIP: " + backendIP + ", backendHttpPort: " + backendHttpPort);
-
-        // Create a for loop to get metrics 5 times
-        for (int j = 0; j < 5; j++) {
-            String metrics = getMetrics(backendIP, backendHttpPort);
-            String filteredMetrics = metrics.split('\n').findAll { line ->
-                line.startsWith('doris_be_thread_pool') && line.contains('workload_group="test_wg_metrics"') && line.contains('thread_pool_name="Scan_test_wg_metrics"')
-            }.join('\n')
-            // Filter metrics with name test_wg_metrics
-            logger.info("filteredMetrics: " + filteredMetrics);
-            List<String> lines = filteredMetrics.split('\n').findAll { it.trim() }
-            assert lines.size() == 5
-        }
-
-        sql "drop workload group if exists test_wg_metrics;"
-    }
-    sql "drop workload group if exists test_wg_metrics;"
 }

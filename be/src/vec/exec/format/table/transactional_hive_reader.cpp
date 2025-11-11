@@ -56,7 +56,7 @@ TransactionalHiveReader::TransactionalHiveReader(std::unique_ptr<GenericReader> 
 
 Status TransactionalHiveReader::init_reader(
         const std::vector<std::string>& column_names,
-        std::unordered_map<std::string, ColumnValueRangeType>* colname_to_value_range,
+        const std::unordered_map<std::string, ColumnValueRangeType>* colname_to_value_range,
         const VExprContextSPtrs& conjuncts, const TupleDescriptor* tuple_descriptor,
         const RowDescriptor* row_descriptor,
         const VExprContextSPtrs* not_single_slot_filter_conjuncts,
@@ -66,8 +66,8 @@ Status TransactionalHiveReader::init_reader(
     _col_names.insert(_col_names.end(), TransactionalHive::READ_ROW_COLUMN_NAMES_LOWER_CASE.begin(),
                       TransactionalHive::READ_ROW_COLUMN_NAMES_LOWER_CASE.end());
     Status status = orc_reader->init_reader(
-            &_col_names, colname_to_value_range, conjuncts, true, tuple_descriptor, row_descriptor,
-            not_single_slot_filter_conjuncts, slot_id_to_filter_conjuncts);
+            &_col_names, {}, colname_to_value_range, conjuncts, true, tuple_descriptor,
+            row_descriptor, not_single_slot_filter_conjuncts, slot_id_to_filter_conjuncts);
     return status;
 }
 
@@ -129,9 +129,9 @@ Status TransactionalHiveReader::init_row_filters(const TFileRangeDesc& range,
         OrcReader delete_reader(_profile, _state, _params, delete_range, _MIN_BATCH_SIZE,
                                 _state->timezone(), _io_ctx, false);
 
-        RETURN_IF_ERROR(
-                delete_reader.init_reader(&TransactionalHive::DELETE_ROW_COLUMN_NAMES_LOWER_CASE,
-                                          nullptr, {}, false, nullptr, nullptr, nullptr, nullptr));
+        RETURN_IF_ERROR(delete_reader.init_reader(
+                &TransactionalHive::DELETE_ROW_COLUMN_NAMES_LOWER_CASE, {}, nullptr, {}, false,
+                nullptr, nullptr, nullptr, nullptr));
 
         std::unordered_map<std::string, std::tuple<std::string, const SlotDescriptor*>>
                 partition_columns;

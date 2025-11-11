@@ -845,6 +845,7 @@ public class EditLog {
                     ModifyTableDefaultDistributionBucketNumOperationLog log =
                             (ModifyTableDefaultDistributionBucketNumOperationLog) journal.getData();
                     env.replayModifyTableDefaultDistributionBucketNum(log);
+                    env.getBinlogManager().addModifyDistributionNum(log, logId);
                     break;
                 }
                 case OperationType.OP_REPLACE_TEMP_PARTITION: {
@@ -1273,8 +1274,20 @@ public class EditLog {
              */
             LOG.warn("[INCONSISTENT META] replay log {} failed, journal {}: {}", logId, journal, e.getMessage(), e);
         } catch (Exception e) {
-            LOG.error("replay Operation Type {}, log id: {}", opCode, logId, e);
-            System.exit(-1);
+            short[] ignoreExceptionLogIds = Config.skip_operation_types_on_replay_exception;
+            boolean skip = false;
+            for (short ignoreLogId : ignoreExceptionLogIds) {
+                if (ignoreLogId == opCode) {
+                    skip = true;
+                    break;
+                }
+            }
+            if (!skip) {
+                LOG.error("replay Operation Type {}, log id: {}", opCode, logId, e);
+                System.exit(-1);
+            } else {
+                LOG.warn("Skip replay Operation Type {} due to exception, log id: {}", opCode, logId, e);
+            }
         }
     }
 
@@ -1931,8 +1944,10 @@ public class EditLog {
         return logModifyTableProperty(OperationType.OP_MODIFY_REPLICATION_NUM, info);
     }
 
-    public void logModifyDefaultDistributionBucketNum(ModifyTableDefaultDistributionBucketNumOperationLog info) {
-        logEdit(OperationType.OP_MODIFY_DISTRIBUTION_BUCKET_NUM, info);
+    public void logModifyDefaultDistributionBucketNum(ModifyTableDefaultDistributionBucketNumOperationLog log) {
+        long logId = logEdit(OperationType.OP_MODIFY_DISTRIBUTION_BUCKET_NUM, log);
+        LOG.info("add modify distribution bucket num binlog, logId: {}, infos: {}", logId, log);
+        Env.getCurrentEnv().getBinlogManager().addModifyDistributionNum(log, logId);
     }
 
     public long logModifyTableProperties(ModifyTablePropertyOperationLog info) {

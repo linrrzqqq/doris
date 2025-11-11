@@ -18,15 +18,18 @@
 #pragma once
 
 #include <memory>
+#include <mutex>
 
 //#include "cloud/cloud_cumulative_compaction.h"
 //#include "cloud/cloud_base_compaction.h"
 //#include "cloud/cloud_full_compaction.h"
 #include "cloud/cloud_cumulative_compaction_policy.h"
 #include "cloud/cloud_tablet.h"
+#include "cloud/config.h"
 #include "cloud/schema_cloud_dictionary_cache.h"
 #include "cloud_txn_delete_bitmap_cache.h"
 #include "io/cache/block_file_cache_factory.h"
+#include "olap/compaction.h"
 #include "olap/storage_engine.h"
 #include "olap/storage_policy.h"
 #include "util/threadpool.h"
@@ -49,7 +52,7 @@ class CloudCompactionStopToken;
 
 class CloudStorageEngine final : public BaseStorageEngine {
 public:
-    CloudStorageEngine(const UniqueId& backend_uid);
+    CloudStorageEngine(const EngineOptions& options);
 
     ~CloudStorageEngine() override;
 
@@ -57,15 +60,12 @@ public:
     void stop() override;
     bool stopped() override;
 
-    Result<BaseTabletSPtr> get_tablet(int64_t tablet_id,
-                                      SyncRowsetStats* sync_stats = nullptr) override;
+    Result<BaseTabletSPtr> get_tablet(int64_t tablet_id, SyncRowsetStats* sync_stats = nullptr,
+                                      bool force_use_cache = false) override;
 
     Status start_bg_threads() override;
 
-    Status set_cluster_id(int32_t cluster_id) override {
-        _effective_cluster_id = cluster_id;
-        return Status::OK();
-    }
+    Status set_cluster_id(int32_t cluster_id) override;
 
     cloud::CloudMetaMgr& meta_mgr() const { return *_meta_mgr; }
 
@@ -164,6 +164,10 @@ private:
     Status _submit_base_compaction_task(const CloudTabletSPtr& tablet);
     Status _submit_cumulative_compaction_task(const CloudTabletSPtr& tablet);
     Status _submit_full_compaction_task(const CloudTabletSPtr& tablet);
+    Status _request_tablet_global_compaction_lock(ReaderType compaction_type,
+                                                  const CloudTabletSPtr& tablet,
+                                                  std::shared_ptr<CloudCompactionMixin> compaction);
+    Status _check_all_root_path_cluster_id();
     void _lease_compaction_thread_callback();
     void _check_tablet_delete_bitmap_score_callback();
 
@@ -190,6 +194,7 @@ private:
 
     // ATTN: Compactions in maps depend on `CloudTabletMgr` and `CloudMetaMgr`
     mutable std::mutex _compaction_mtx;
+    mutable std::mutex _cumu_compaction_delay_mtx;
     // tablet_id -> submitted base compaction, guarded by `_compaction_mtx`
     std::unordered_map<int64_t, std::shared_ptr<CloudBaseCompaction>> _submitted_base_compactions;
     // tablet_id -> submitted full compaction, guarded by `_compaction_mtx`
@@ -202,13 +207,22 @@ private:
     // tablet_id -> active compaction stop tokens
     std::unordered_map<int64_t, std::shared_ptr<CloudCompactionStopToken>>
             _active_compaction_stop_tokens;
-
-    std::unique_ptr<ThreadPool> _base_compaction_thread_pool;
-    std::unique_ptr<ThreadPool> _cumu_compaction_thread_pool;
+    // tablet_id -> executing cumu compactions, guarded by `_compaction_mtx`
+    std::unordered_map<int64_t, std::vector<std::shared_ptr<CloudCumulativeCompaction>>>
+            _executing_cumu_compactions;
+    // tablet_id -> executing base compactions, guarded by `_compaction_mtx`
+    std::unordered_map<int64_t, std::shared_ptr<CloudBaseCompaction>> _executing_base_compactions;
+    // tablet_id -> executing full compactions, guarded by `_compaction_mtx`
+    std::unordered_map<int64_t, std::shared_ptr<CloudFullCompaction>> _executing_full_compactions;
 
     using CumuPolices =
             std::unordered_map<std::string_view, std::shared_ptr<CloudCumulativeCompactionPolicy>>;
     CumuPolices _cumulative_compaction_policies;
+
+    std::atomic_bool first_sync_storage_vault {true};
+
+    EngineOptions _options;
+    std::mutex _store_lock;
 };
 
 } // namespace doris

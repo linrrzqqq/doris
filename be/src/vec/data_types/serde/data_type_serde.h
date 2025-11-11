@@ -75,31 +75,6 @@ struct ColumnVectorBatch;
         ++*num_deserialized;                                                             \
     }
 
-#define INIT_MEMORY_FOR_ORC_WRITER()                                                 \
-    char* ptr = (char*)malloc(BUFFER_UNIT_SIZE);                                     \
-    if (!ptr) {                                                                      \
-        return Status::InternalError(                                                \
-                "malloc memory error when write largeint column data to orc file."); \
-    }                                                                                \
-    StringRef bufferRef;                                                             \
-    bufferRef.data = ptr;                                                            \
-    bufferRef.size = BUFFER_UNIT_SIZE;                                               \
-    size_t offset = 0;                                                               \
-    buffer_list.emplace_back(bufferRef);
-
-#define REALLOC_MEMORY_FOR_ORC_WRITER()                                                  \
-    while (bufferRef.size - BUFFER_RESERVED_SIZE < offset + len) {                       \
-        char* new_ptr = (char*)malloc(bufferRef.size + BUFFER_UNIT_SIZE);                \
-        if (!new_ptr) {                                                                  \
-            return Status::InternalError(                                                \
-                    "malloc memory error when write largeint column data to orc file."); \
-        }                                                                                \
-        memcpy(new_ptr, bufferRef.data, bufferRef.size);                                 \
-        free(const_cast<char*>(bufferRef.data));                                         \
-        bufferRef.data = new_ptr;                                                        \
-        bufferRef.size = bufferRef.size + BUFFER_UNIT_SIZE;                              \
-    }
-
 namespace doris {
 class PValues;
 class JsonbValue;
@@ -152,6 +127,8 @@ public:
          */
         bool converted_from_string = false;
 
+        char quote_char = '"';
+
         char escape_char = 0;
         /**
          * flags for each byte to indicate if escape is needed.
@@ -180,6 +157,26 @@ public:
          */
         const char* nested_string_wrapper;
         int wrapper_len;
+
+        /**
+         * mysql_collection_delim is used to separate elements in collection, such as array, map, struct
+         * It is used to write to mysql.
+         */
+        std::string mysql_collection_delim = ", ";
+
+        /**
+         * is_bool_value_num is used to display bool value in collection, such as array, map, struct
+         * eg, if set to true, the array<true> will be:
+         *      [1]
+         *     if set to false, the array<true> will be:
+         *      [true]
+         */
+        bool is_bool_value_num = true;
+
+        /**
+         * Indicate the nested level of column. It is used to control some behavior of serde
+         */
+        mutable int level = 0;
 
         [[nodiscard]] char get_collection_delimiter(
                 int hive_text_complex_type_delimiter_level) const {
@@ -251,6 +248,14 @@ public:
 
     virtual Status deserialize_one_cell_from_json(IColumn& column, Slice& slice,
                                                   const FormatOptions& options) const = 0;
+
+    // In some cases, CSV and JSON deserialization behaviors may differ
+    // so we provide a default implementation that uses JSON deserialization
+    virtual Status deserialize_one_cell_from_csv(IColumn& column, Slice& slice,
+                                                 const FormatOptions& options) const {
+        return deserialize_one_cell_from_json(column, slice, options);
+    }
+
     // deserialize text vector is to avoid virtual function call in complex type nested loop
     virtual Status deserialize_column_from_json_vector(IColumn& column, std::vector<Slice>& slices,
                                                        int* num_deserialized,

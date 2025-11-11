@@ -98,6 +98,7 @@ private:
     std::set<int32_t> _maybe_read_column_ids;
 
     std::unique_ptr<RuntimeProfile> _segment_profile;
+    std::unique_ptr<RuntimeProfile> _index_filter_profile;
 
     RuntimeProfile::Counter* _tablet_counter = nullptr;
     RuntimeProfile::Counter* _key_range_counter = nullptr;
@@ -131,6 +132,10 @@ private:
     RuntimeProfile::Counter* _block_fetch_timer = nullptr;
     RuntimeProfile::Counter* _delete_bitmap_get_agg_timer = nullptr;
     RuntimeProfile::Counter* _sync_rowset_timer = nullptr;
+    RuntimeProfile::Counter* _sync_rowset_get_remote_tablet_meta_rpc_timer = nullptr;
+    RuntimeProfile::Counter* _sync_rowset_tablet_meta_cache_hit = nullptr;
+    RuntimeProfile::Counter* _sync_rowset_tablet_meta_cache_miss = nullptr;
+    RuntimeProfile::Counter* _sync_rowset_tablets_rowsets_total_num = nullptr;
     RuntimeProfile::Counter* _sync_rowset_get_remote_rowsets_num = nullptr;
     RuntimeProfile::Counter* _sync_rowset_get_remote_rowsets_rpc_timer = nullptr;
     RuntimeProfile::Counter* _sync_rowset_get_local_delete_bitmap_rowsets_num = nullptr;
@@ -180,6 +185,8 @@ private:
     RuntimeProfile::Counter* _inverted_index_query_bitmap_copy_timer = nullptr;
     RuntimeProfile::Counter* _inverted_index_searcher_open_timer = nullptr;
     RuntimeProfile::Counter* _inverted_index_searcher_search_timer = nullptr;
+    RuntimeProfile::Counter* _inverted_index_searcher_search_init_timer = nullptr;
+    RuntimeProfile::Counter* _inverted_index_searcher_search_exec_timer = nullptr;
     RuntimeProfile::Counter* _inverted_index_searcher_cache_hit_counter = nullptr;
     RuntimeProfile::Counter* _inverted_index_searcher_cache_miss_counter = nullptr;
     RuntimeProfile::Counter* _inverted_index_downgrade_count_counter = nullptr;
@@ -222,7 +229,7 @@ private:
 
     std::mutex _profile_mtx;
     std::vector<TabletWithVersion> _tablets;
-    std::vector<TabletReader::ReadSource> _read_sources;
+    std::vector<TabletReadSource> _read_sources;
 };
 
 class OlapScanOperatorX final : public ScanOperatorX<OlapScanLocalState> {

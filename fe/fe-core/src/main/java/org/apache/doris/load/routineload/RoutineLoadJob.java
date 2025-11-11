@@ -293,6 +293,7 @@ public abstract class RoutineLoadJob
 
     // use for cloud cluster mode
     protected String qualifiedUser;
+    @SerializedName("ccn")
     protected String cloudCluster;
 
     public void setTypeRead(boolean isTypeRead) {
@@ -304,6 +305,13 @@ public abstract class RoutineLoadJob
         this.dataSourceType = type;
         if (ConnectContext.get() != null) {
             this.memtableOnSinkNode = ConnectContext.get().getSessionVariable().enableMemtableOnSinkNode;
+            if (Config.isCloudMode()) {
+                try {
+                    this.cloudCluster = ConnectContext.get().getCloudCluster();
+                } catch (ComputeGroupException e) {
+                    LOG.warn("failed to get cloud cluster", e);
+                }
+            }
         }
     }
 
@@ -321,6 +329,13 @@ public abstract class RoutineLoadJob
             SessionVariable var = ConnectContext.get().getSessionVariable();
             sessionVariables.put(SessionVariable.SQL_MODE, Long.toString(var.getSqlMode()));
             this.memtableOnSinkNode = ConnectContext.get().getSessionVariable().enableMemtableOnSinkNode;
+            if (Config.isCloudMode()) {
+                try {
+                    this.cloudCluster = ConnectContext.get().getCloudCluster();
+                } catch (ComputeGroupException e) {
+                    LOG.warn("failed to get cloud cluster", e);
+                }
+            }
         } else {
             sessionVariables.put(SessionVariable.SQL_MODE, String.valueOf(SqlModeHelper.MODE_DEFAULT));
         }
@@ -343,7 +358,6 @@ public abstract class RoutineLoadJob
             SessionVariable var = ConnectContext.get().getSessionVariable();
             sessionVariables.put(SessionVariable.SQL_MODE, Long.toString(var.getSqlMode()));
             this.memtableOnSinkNode = ConnectContext.get().getSessionVariable().enableMemtableOnSinkNode;
-            this.qualifiedUser = ConnectContext.get().getQualifiedUser();
             try {
                 this.cloudCluster = ConnectContext.get().getCloudCluster();
             } catch (ComputeGroupException e) {
@@ -789,10 +803,6 @@ public abstract class RoutineLoadJob
         this.comment = comment;
     }
 
-    public String getQualifiedUser() {
-        return qualifiedUser;
-    }
-
     public String getCloudCluster() {
         return cloudCluster;
     }
@@ -873,11 +883,6 @@ public abstract class RoutineLoadJob
     // All of private method could not be call without lock
     private void checkStateTransform(RoutineLoadJob.JobState desireState) throws UserException {
         switch (state) {
-            case RUNNING:
-                if (desireState == JobState.NEED_SCHEDULE) {
-                    throw new DdlException("Could not transform " + state + " to " + desireState);
-                }
-                break;
             case PAUSED:
                 if (desireState == JobState.PAUSED) {
                     throw new DdlException("Could not transform " + state + " to " + desireState);
@@ -1021,21 +1026,13 @@ public abstract class RoutineLoadJob
         table.readLock();
         try {
             if (Config.isCloudMode()) {
-                String clusterName = ((CloudSystemInfoService) Env.getCurrentSystemInfo())
-                        .getClusterNameByClusterId(cloudClusterId);
-                if (Strings.isNullOrEmpty(clusterName)) {
-                    String err = String.format("cluster name is empty, cluster id is %s", cloudClusterId);
-                    LOG.warn(err);
-                    throw new UserException(err);
-                }
-
                 if (ConnectContext.get() == null) {
                     ConnectContext ctx = new ConnectContext();
                     ctx.setThreadLocalInfo();
-                    ctx.setCloudCluster(clusterName);
+                    ctx.setCloudCluster(cloudCluster);
                     needCleanCtx = true;
                 } else {
-                    ConnectContext.get().setCloudCluster(clusterName);
+                    ConnectContext.get().setCloudCluster(cloudCluster);
                 }
             }
 
@@ -1610,27 +1607,15 @@ public abstract class RoutineLoadJob
         this.origStmt = origStmt;
     }
 
-    public void setCloudCluster(String cloudClusterName) throws UserException {
-        if (Strings.isNullOrEmpty(cloudClusterName)) {
-            LOG.warn("cluster name is empty");
-            throw new UserException("cluster name is empty");
-        }
-
-        this.cloudClusterId = ((CloudSystemInfoService) Env.getCurrentSystemInfo())
-                .getCloudClusterIdByName(cloudClusterName);
-        if (Strings.isNullOrEmpty(this.cloudClusterId)) {
-            LOG.warn("cluster id is empty, cluster name {}", cloudClusterName);
-            throw new UserException("cluster id is empty, cluster name: " + cloudClusterName);
+    public void setCloudCluster() {
+        if (Strings.isNullOrEmpty(cloudCluster)) {
+            this.cloudCluster = ((CloudSystemInfoService) Env.getCurrentSystemInfo())
+                    .getClusterNameByClusterId(cloudClusterId);
         }
     }
 
-    public String getCloudClusterId() {
-        return cloudClusterId;
-    }
-
-    public void setCloudClusterById() {
-        this.cloudCluster = ((CloudSystemInfoService) Env.getCurrentSystemInfo())
-                        .getClusterNameByClusterId(cloudClusterId);
+    public void setCloudCluster(String cloudCluster) {
+        this.cloudCluster = cloudCluster;
     }
 
     // check the correctness of commit info
@@ -1741,7 +1726,7 @@ public abstract class RoutineLoadJob
         }
         // 4.3.where_predicates
         if (whereExpr != null) {
-            sb.append("WHERE ").append(whereExpr.toSql()).append(",\n");
+            sb.append("WHERE ").append(whereExpr.toSqlWithoutTbl()).append(",\n");
         }
         // 4.4.partitions
         if (partitions != null) {
@@ -1749,7 +1734,7 @@ public abstract class RoutineLoadJob
         }
         // 4.5.delete_on_predicates
         if (deleteCondition != null) {
-            sb.append("DELETE ON ").append(deleteCondition.toSql()).append(",\n");
+            sb.append("DELETE ON ").append(deleteCondition.toSqlWithoutTbl()).append(",\n");
         }
         // 4.6.source_sequence
         if (sequenceCol != null) {
@@ -1757,7 +1742,7 @@ public abstract class RoutineLoadJob
         }
         // 4.7.preceding_predicates
         if (precedingFilter != null) {
-            sb.append("PRECEDING FILTER ").append(precedingFilter.toSql()).append(",\n");
+            sb.append("PRECEDING FILTER ").append(precedingFilter.toSqlWithoutTbl()).append(",\n");
         }
         // remove the last ,
         if (sb.charAt(sb.length() - 2) == ',') {
@@ -1844,14 +1829,16 @@ public abstract class RoutineLoadJob
         }
     }
 
+    // jobPropertiesJsonString contains both load properties and job properties defined in CreateRoutineLoadStmt
     public String jobPropertiesToJsonString() {
         Map<String, String> jobProperties = Maps.newHashMap();
+        // load properties defined in CreateRoutineLoadStmt
         jobProperties.put("partitions", partitions == null
                 ? STAR_STRING : Joiner.on(",").join(partitions.getPartitionNames()));
         jobProperties.put("columnToColumnExpr", columnDescs == null
                 ? STAR_STRING : Joiner.on(",").join(columnDescs.descs));
-        jobProperties.put("precedingFilter", precedingFilter == null ? STAR_STRING : precedingFilter.toSql());
-        jobProperties.put("whereExpr", whereExpr == null ? STAR_STRING : whereExpr.toSql());
+        jobProperties.put("precedingFilter", precedingFilter == null ? STAR_STRING : precedingFilter.toSqlWithoutTbl());
+        jobProperties.put("whereExpr", whereExpr == null ? STAR_STRING : whereExpr.toSqlWithoutTbl());
         if (getFormat().equalsIgnoreCase("json")) {
             jobProperties.put(PROPS_FORMAT, "json");
         } else {
@@ -1860,6 +1847,12 @@ public abstract class RoutineLoadJob
             jobProperties.put(LoadStmt.KEY_IN_PARAM_LINE_DELIMITER,
                     lineDelimiter == null ? "\n" : lineDelimiter.toString());
         }
+        jobProperties.put(LoadStmt.KEY_IN_PARAM_DELETE_CONDITION,
+                deleteCondition == null ? STAR_STRING : deleteCondition.toSqlWithoutTbl());
+        jobProperties.put(LoadStmt.KEY_IN_PARAM_SEQUENCE_COL,
+                sequenceCol == null ? STAR_STRING : sequenceCol);
+
+        // job properties defined in CreateRoutineLoadStmt
         jobProperties.put(CreateRoutineLoadStmt.PARTIAL_COLUMNS, String.valueOf(isPartialUpdate));
         jobProperties.put(CreateRoutineLoadStmt.MAX_ERROR_NUMBER_PROPERTY, String.valueOf(maxErrorNum));
         jobProperties.put(CreateRoutineLoadStmt.MAX_BATCH_INTERVAL_SEC_PROPERTY, String.valueOf(maxBatchIntervalS));
@@ -1871,8 +1864,6 @@ public abstract class RoutineLoadJob
                 String.valueOf(desireTaskConcurrentNum));
         jobProperties.put(LoadStmt.EXEC_MEM_LIMIT, String.valueOf(execMemLimit));
         jobProperties.put(LoadStmt.KEY_IN_PARAM_MERGE_TYPE, mergeType.toString());
-        jobProperties.put(LoadStmt.KEY_IN_PARAM_DELETE_CONDITION,
-                deleteCondition == null ? STAR_STRING : deleteCondition.toSql());
         jobProperties.putAll(this.jobProperties);
         Gson gson = new GsonBuilder().disableHtmlEscaping().create();
         return gson.toJson(jobProperties);
@@ -2065,6 +2056,7 @@ public abstract class RoutineLoadJob
         if (jobProperties.containsKey(CreateRoutineLoadStmt.MAX_FILTER_RATIO_PROPERTY)) {
             this.maxFilterRatio = Double.parseDouble(
                     jobProperties.remove(CreateRoutineLoadStmt.MAX_FILTER_RATIO_PROPERTY));
+            this.jobProperties.put(CreateRoutineLoadStmt.MAX_FILTER_RATIO_PROPERTY, String.valueOf(maxFilterRatio));
         }
 
         if (jobProperties.containsKey(CreateRoutineLoadStmt.MAX_BATCH_INTERVAL_SEC_PROPERTY)) {

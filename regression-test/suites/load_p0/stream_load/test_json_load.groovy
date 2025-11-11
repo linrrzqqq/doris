@@ -228,9 +228,9 @@ suite("test_json_load", "p0,nonConcurrent") {
     }
 
     def check_load_result = {checklabel, testTablex ->
-        max_try_milli_secs = 10000
+        def max_try_milli_secs = 100000
         while(max_try_milli_secs) {
-            result = sql "show load where label = '${checklabel}'"
+            def result = sql "show load where label = '${checklabel}'"
             if(result[0][2] == "FINISHED") {
                 sql "sync"
                 qt_select "select * from ${testTablex} order by id"
@@ -654,9 +654,9 @@ suite("test_json_load", "p0,nonConcurrent") {
     // if 'enableHdfs' in regression-conf.groovy has been set to true,
     // the test will run these case as below.
     if (enableHdfs()) {
-        brokerName =getBrokerName()
-        hdfsUser = getHdfsUser()
-        hdfsPasswd = getHdfsPasswd()
+        def brokerName =getBrokerName()
+        def hdfsUser = getHdfsUser()
+        def hdfsPasswd = getHdfsPasswd()
         def hdfs_file_path = uploadToHdfs "load_p0/stream_load/simple_object_json.json"
         def format = "json" 
 
@@ -925,6 +925,62 @@ suite("test_json_load", "p0,nonConcurrent") {
 
         load_json_data.call("${testTable}", "${testTable}_case31", 'true', 'false', 'json', '', '[\"$.id\", \"$.city.name\", \"$.city.region\"]',
                              '', '', '', 'test_json_extract_path_invalid_type.json', false, 2)
+        
+        sql "sync"
+        qt_select31 "select * from ${testTable} order by id"
+
+    } finally {
+        // try_sql("DROP TABLE IF EXISTS ${testTable}")
+    }
+
+    // support read "$."  as root with json type
+    try {
+        sql "DROP TABLE IF EXISTS ${testTable}"
+        sql """CREATE TABLE IF NOT EXISTS ${testTable} 
+            (
+                `k1` varchar(1024) NULL,
+                `k2` json NULL,
+                `k3` json NULL,
+                `k4` json NULL
+            )
+            DUPLICATE KEY(`k1`)
+            COMMENT ''
+            DISTRIBUTED BY RANDOM BUCKETS 1
+            PROPERTIES (
+            "replication_allocation" = "tag.location.default: 1"
+            );"""
+
+        load_json_data.call("${testTable}", "${testTable}_case30", 'false', 'true', 'json', '', '[\"$.k1\",\"$.\", \"$.\", \"$.k3\"]',
+                             '', '', '', 'test_read_root_path.json')
+        
+        sql "sync"
+        qt_select30 "select * from ${testTable} order by k1"
+
+    } finally {
+        // try_sql("DROP TABLE IF EXISTS ${testTable}")
+    }
+
+    // try to load  `boolean` => `tinyint, int , string, decimal`
+    try {
+        sql "DROP TABLE IF EXISTS ${testTable}"
+        sql """CREATE TABLE IF NOT EXISTS ${testTable} 
+            (
+                `id` int,
+                `k1` tinyint NULL,
+                `k2` int NULL,
+                `k3` string NULL,
+                `k4` decimal(10,2) NULL
+            )
+            DUPLICATE KEY(`id`)
+            COMMENT ''
+            DISTRIBUTED BY RANDOM BUCKETS 1
+            PROPERTIES (
+            "replication_allocation" = "tag.location.default: 1"
+            );"""
+
+
+        load_json_data.call("${testTable}", "${testTable}_case31", 'true', '', 'json', '', '',
+                             '', '', '', 'test_read_boolean_to_int.json')
         
         sql "sync"
         qt_select31 "select * from ${testTable} order by id"

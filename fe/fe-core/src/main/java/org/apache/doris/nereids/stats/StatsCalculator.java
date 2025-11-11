@@ -258,8 +258,14 @@ public class StatsCalculator extends DefaultPlanVisitor<Statistics, Void> {
             double rowCount = calculator.getTableRowCount(scan);
             // row count not available
             if (rowCount == -1) {
-                LOG.info("disable join reorder since row count not available: "
-                        + scan.getTable().getNameWithFullQualifiers());
+                try {
+                    ConnectContext.get().getSessionVariable()
+                            .setVarOnce(SessionVariable.DISABLE_JOIN_REORDER, "true");
+                    LOG.info("disable join reorder since row count not available: "
+                            + scan.getTable().getNameWithFullQualifiers());
+                } catch (Exception e) {
+                    LOG.info("disableNereidsJoinReorderOnce failed");
+                }
                 return Optional.of("table[" + scan.getTable().getName() + "] row count is invalid");
             }
             if (scan instanceof OlapScan) {
@@ -302,13 +308,33 @@ public class StatsCalculator extends DefaultPlanVisitor<Statistics, Void> {
 
     private void estimate() {
         Plan plan = groupExpression.getPlan();
-        Statistics newStats = plan.accept(this, null);
+        Statistics newStats;
+        try {
+            newStats = plan.accept(this, null);
+        } catch (Exception e) {
+            // throw exception in debug mode
+            if (ConnectContext.get() != null && ConnectContext.get().getSessionVariable().feDebug) {
+                throw e;
+            }
+            LOG.warn("stats calculation failed, plan " + plan.toString(), e);
+            // use unknown stats or the first child's stats
+            if (plan.children().isEmpty() || !(plan.child(0) instanceof GroupPlan)) {
+                Map<Expression, ColumnStatistic> columnStatisticMap = new HashMap<>();
+                for (Slot slot : plan.getOutput()) {
+                    columnStatisticMap.put(slot, ColumnStatistic.createUnknownByDataType(slot.getDataType()));
+                }
+                newStats = new Statistics(1, 1, columnStatisticMap);
+            } else {
+                newStats = ((GroupPlan) plan.child(0)).getStats();
+            }
+        }
         newStats.normalizeColumnStatistics();
 
         // We ensure that the rowCount remains unchanged in order to make the cost of each plan comparable.
+        final Statistics tmpStats = newStats;
         if (groupExpression.getOwnerGroup().getStatistics() == null) {
             boolean isReliable = groupExpression.getPlan().getExpressions().stream()
-                    .noneMatch(e -> newStats.isInputSlotsUnknown(e.getInputSlots()));
+                    .noneMatch(e -> tmpStats.isInputSlotsUnknown(e.getInputSlots()));
             groupExpression.getOwnerGroup().setStatsReliable(isReliable);
             groupExpression.getOwnerGroup().setStatistics(newStats);
         } else {
@@ -1178,8 +1204,15 @@ public class StatsCalculator extends DefaultPlanVisitor<Statistics, Void> {
             catalogId = -1;
             dbId = -1;
         }
-        return Env.getCurrentEnv().getStatisticsCache().getColumnStatistics(
+        ColumnStatistic columnStatistics = Env.getCurrentEnv().getStatisticsCache().getColumnStatistics(
                 catalogId, dbId, table.getId(), idxId, colName);
+        if (!columnStatistics.isUnKnown
+                && columnStatistics.ndv == 0
+                && (columnStatistics.minExpr != null || columnStatistics.maxExpr != null)
+                && columnStatistics.numNulls == columnStatistics.count) {
+            return ColumnStatistic.UNKNOWN;
+        }
+        return columnStatistics;
     }
 
     private ColumnStatistic getColumnStatistic(TableIf table, String colName, long idxId, List<String> partitionNames) {

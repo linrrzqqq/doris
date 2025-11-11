@@ -153,6 +153,9 @@ void StreamLoadAction::handle(HttpRequest* req) {
     // update statistics
     streaming_load_requests_total->increment(1);
     streaming_load_duration_ms->increment(ctx->load_cost_millis);
+    if (!ctx->data_saved_path.empty()) {
+        _exec_env->load_path_mgr()->clean_tmp_files(ctx->data_saved_path);
+    }
 }
 
 Status StreamLoadAction::_handle(std::shared_ptr<StreamLoadContext> ctx) {
@@ -329,11 +332,7 @@ Status StreamLoadAction::_on_header(HttpRequest* http_req, std::shared_ptr<Strea
     }
 
     if (!http_req->header(HTTP_TIMEOUT).empty()) {
-        try {
-            ctx->timeout_second = std::stoi(http_req->header(HTTP_TIMEOUT));
-        } catch (const std::invalid_argument& e) {
-            return Status::InvalidArgument("Invalid timeout format, {}", e.what());
-        }
+        ctx->timeout_second = DORIS_TRY(safe_stoi(http_req->header(HTTP_TIMEOUT), HTTP_TIMEOUT));
     }
     if (!http_req->header(HTTP_COMMENT).empty()) {
         ctx->load_comment = http_req->header(HTTP_COMMENT);
@@ -436,13 +435,14 @@ Status StreamLoadAction::_process_put(HttpRequest* http_req,
         ctx->pipe = pipe;
         RETURN_IF_ERROR(_exec_env->new_load_stream_mgr()->put(ctx->id, ctx));
     } else {
-        RETURN_IF_ERROR(_data_saved_path(http_req, &request.path));
+        RETURN_IF_ERROR(_data_saved_path(http_req, &request.path, ctx->body_bytes));
         auto file_sink = std::make_shared<MessageBodyFileSink>(request.path);
         RETURN_IF_ERROR(file_sink->open());
         request.__isset.path = true;
         request.fileType = TFileType::FILE_LOCAL;
         request.__set_file_size(ctx->body_bytes);
         ctx->body_sink = file_sink;
+        ctx->data_saved_path = request.path;
     }
     if (!http_req->header(HTTP_COLUMNS).empty()) {
         request.__set_columns(http_req->header(HTTP_COLUMNS));
@@ -565,15 +565,9 @@ Status StreamLoadAction::_process_put(HttpRequest* http_req,
     }
 
     if (!http_req->header(HTTP_SEND_BATCH_PARALLELISM).empty()) {
-        try {
-            request.__set_send_batch_parallelism(
-                    std::stoi(http_req->header(HTTP_SEND_BATCH_PARALLELISM)));
-        } catch (const std::invalid_argument& e) {
-            return Status::InvalidArgument("send_batch_parallelism must be an integer, {}",
-                                           e.what());
-        } catch (const std::out_of_range& e) {
-            return Status::InvalidArgument("send_batch_parallelism out of range, {}", e.what());
-        }
+        int parallelism = DORIS_TRY(safe_stoi(http_req->header(HTTP_SEND_BATCH_PARALLELISM),
+                                              HTTP_SEND_BATCH_PARALLELISM));
+        request.__set_send_batch_parallelism(parallelism);
     }
 
     if (!http_req->header(HTTP_LOAD_TO_SINGLE_TABLET).empty()) {
@@ -629,7 +623,11 @@ Status StreamLoadAction::_process_put(HttpRequest* http_req,
         }
     }
     if (!http_req->header(HTTP_SKIP_LINES).empty()) {
-        request.__set_skip_lines(std::stoi(http_req->header(HTTP_SKIP_LINES)));
+        int skip_lines = DORIS_TRY(safe_stoi(http_req->header(HTTP_SKIP_LINES), HTTP_SKIP_LINES));
+        if (skip_lines < 0) {
+            return Status::InvalidArgument("Invalid 'skip_lines': {}", skip_lines);
+        }
+        request.__set_skip_lines(skip_lines);
     }
     if (!http_req->header(HTTP_ENABLE_PROFILE).empty()) {
         if (iequal(http_req->header(HTTP_ENABLE_PROFILE), "true")) {
@@ -650,8 +648,9 @@ Status StreamLoadAction::_process_put(HttpRequest* http_req,
         request.__set_memtable_on_sink_node(value);
     }
     if (!http_req->header(HTTP_LOAD_STREAM_PER_NODE).empty()) {
-        int value = std::stoi(http_req->header(HTTP_LOAD_STREAM_PER_NODE));
-        request.__set_stream_per_node(value);
+        int stream_per_node = DORIS_TRY(
+                safe_stoi(http_req->header(HTTP_LOAD_STREAM_PER_NODE), HTTP_LOAD_STREAM_PER_NODE));
+        request.__set_stream_per_node(stream_per_node);
     }
     if (ctx->group_commit) {
         if (!http_req->header(HTTP_GROUP_COMMIT).empty()) {
@@ -721,9 +720,11 @@ Status StreamLoadAction::_process_put(HttpRequest* http_req,
     return _exec_env->stream_load_executor()->execute_plan_fragment(ctx);
 }
 
-Status StreamLoadAction::_data_saved_path(HttpRequest* req, std::string* file_path) {
+Status StreamLoadAction::_data_saved_path(HttpRequest* req, std::string* file_path,
+                                          int64_t file_bytes) {
     std::string prefix;
-    RETURN_IF_ERROR(_exec_env->load_path_mgr()->allocate_dir(req->param(HTTP_DB_KEY), "", &prefix));
+    RETURN_IF_ERROR(_exec_env->load_path_mgr()->allocate_dir(req->param(HTTP_DB_KEY), "", &prefix,
+                                                             file_bytes));
     timeval tv;
     gettimeofday(&tv, nullptr);
     struct tm tm;

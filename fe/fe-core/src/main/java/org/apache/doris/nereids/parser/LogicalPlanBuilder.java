@@ -27,6 +27,7 @@ import org.apache.doris.analysis.TableSnapshot;
 import org.apache.doris.analysis.UserIdentity;
 import org.apache.doris.catalog.AggregateType;
 import org.apache.doris.catalog.BuiltinAggregateFunctions;
+import org.apache.doris.catalog.BuiltinTableGeneratingFunctions;
 import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.KeysType;
 import org.apache.doris.catalog.ScalarType;
@@ -100,6 +101,7 @@ import org.apache.doris.nereids.DorisParser.ElementAtContext;
 import org.apache.doris.nereids.DorisParser.ExistContext;
 import org.apache.doris.nereids.DorisParser.ExplainContext;
 import org.apache.doris.nereids.DorisParser.ExportContext;
+import org.apache.doris.nereids.DorisParser.ExpressionWithOrderContext;
 import org.apache.doris.nereids.DorisParser.FixedPartitionDefContext;
 import org.apache.doris.nereids.DorisParser.FromClauseContext;
 import org.apache.doris.nereids.DorisParser.GroupingElementContext;
@@ -458,6 +460,7 @@ import org.apache.doris.nereids.trees.plans.logical.LogicalIntersect;
 import org.apache.doris.nereids.trees.plans.logical.LogicalJoin;
 import org.apache.doris.nereids.trees.plans.logical.LogicalLimit;
 import org.apache.doris.nereids.trees.plans.logical.LogicalPlan;
+import org.apache.doris.nereids.trees.plans.logical.LogicalPreAggOnHint;
 import org.apache.doris.nereids.trees.plans.logical.LogicalProject;
 import org.apache.doris.nereids.trees.plans.logical.LogicalRepeat;
 import org.apache.doris.nereids.trees.plans.logical.LogicalSelectHint;
@@ -471,6 +474,10 @@ import org.apache.doris.nereids.types.ArrayType;
 import org.apache.doris.nereids.types.BigIntType;
 import org.apache.doris.nereids.types.BooleanType;
 import org.apache.doris.nereids.types.DataType;
+import org.apache.doris.nereids.types.DateTimeType;
+import org.apache.doris.nereids.types.DateTimeV2Type;
+import org.apache.doris.nereids.types.DateType;
+import org.apache.doris.nereids.types.DateV2Type;
 import org.apache.doris.nereids.types.LargeIntType;
 import org.apache.doris.nereids.types.MapType;
 import org.apache.doris.nereids.types.StructField;
@@ -1254,8 +1261,13 @@ public class LogicalPlanBuilder extends DorisParserBaseVisitor<Object> {
         String generateName = ctx.tableName.getText();
         // if later view explode map type, we need to add a project to convert map to struct
         String columnName = ctx.columnNames.get(0).getText();
-        List<String> expandColumnNames = Lists.newArrayList();
-        if (ctx.columnNames.size() > 1) {
+        List<String> expandColumnNames = ImmutableList.of();
+
+        // explode can pass multiple columns
+        // then use struct to return the result of the expansion of multiple columns.
+        if (ctx.columnNames.size() > 1
+                || BuiltinTableGeneratingFunctions.INSTANCE.getReturnManyColumnFunctions()
+                    .contains(ctx.functionName.getText())) {
             columnName = ConnectContext.get() != null
                     ? ConnectContext.get().getStatementContext().generateColumnName() : "expand_cols";
             expandColumnNames = ctx.columnNames.stream()
@@ -1450,12 +1462,15 @@ public class LogicalPlanBuilder extends DorisParserBaseVisitor<Object> {
                 return selectPlan;
             }
             List<ParserRuleContext> selectHintContexts = Lists.newArrayList();
+            List<ParserRuleContext> preAggOnHintContexts = Lists.newArrayList();
             for (Integer key : selectHintMap.keySet()) {
                 if (key > selectCtx.getStart().getStopIndex() && key < selectCtx.getStop().getStartIndex()) {
                     selectHintContexts.add(selectHintMap.get(key));
+                } else {
+                    preAggOnHintContexts.add(selectHintMap.get(key));
                 }
             }
-            return withSelectHint(selectPlan, selectHintContexts);
+            return withHints(selectPlan, selectHintContexts, preAggOnHintContexts);
         });
     }
 
@@ -2245,7 +2260,7 @@ public class LogicalPlanBuilder extends DorisParserBaseVisitor<Object> {
             String functionName = ctx.functionIdentifier().functionNameIdentifier().getText();
             boolean isDistinct = ctx.DISTINCT() != null;
             List<Expression> params = Lists.newArrayList();
-            params.addAll(visit(ctx.expression(), Expression.class));
+            params.addAll(visit(ctx.funcExpression(), Expression.class));
             List<OrderKey> orderKeys = visit(ctx.sortItem(), OrderKey.class);
             params.addAll(orderKeys.stream().map(OrderExpression::new).collect(Collectors.toList()));
 
@@ -2374,19 +2389,37 @@ public class LogicalPlanBuilder extends DorisParserBaseVisitor<Object> {
     }
 
     @Override
-    public Literal visitTypeConstructor(TypeConstructorContext ctx) {
+    public Expression visitTypeConstructor(TypeConstructorContext ctx) {
         String value = ctx.STRING_LITERAL().getText();
         value = value.substring(1, value.length() - 1);
         String type = ctx.type.getText().toUpperCase();
         switch (type) {
             case "DATE":
-                return Config.enable_date_conversion ? new DateV2Literal(value) : new DateLiteral(value);
+                try {
+                    return Config.enable_date_conversion ? new DateV2Literal(value) : new DateLiteral(value);
+                } catch (Exception e) {
+                    return new Cast(new StringLiteral(value),
+                            Config.enable_date_conversion ? DateV2Type.INSTANCE : DateType.INSTANCE);
+                }
             case "TIMESTAMP":
-                return Config.enable_date_conversion ? new DateTimeV2Literal(value) : new DateTimeLiteral(value);
+                try {
+                    return Config.enable_date_conversion ? new DateTimeV2Literal(value) : new DateTimeLiteral(value);
+                } catch (Exception e) {
+                    return new Cast(new StringLiteral(value),
+                            Config.enable_date_conversion ? DateTimeV2Type.MAX : DateTimeType.INSTANCE);
+                }
             case "DATEV2":
-                return new DateV2Literal(value);
+                try {
+                    return new DateV2Literal(value);
+                } catch (Exception e) {
+                    return new Cast(new StringLiteral(value), DateV2Type.INSTANCE);
+                }
             case "DATEV1":
-                return new DateLiteral(value);
+                try {
+                    return new DateLiteral(value);
+                } catch (Exception e) {
+                    return new Cast(new StringLiteral(value), DateType.INSTANCE);
+                }
             default:
                 throw new ParseException("Unsupported data type : " + type, ctx);
         }
@@ -2637,6 +2670,16 @@ public class LogicalPlanBuilder extends DorisParserBaseVisitor<Object> {
             boolean isNullFirst = ctx.FIRST() != null || (ctx.LAST() == null && isAsc);
             Expression expression = typedVisit(ctx.expression());
             return new OrderKey(expression, isAsc, isNullFirst);
+        });
+    }
+
+    @Override
+    public GroupKeyWithOrder visitExpressionWithOrder(ExpressionWithOrderContext ctx) {
+        return ParserUtils.withOrigin(ctx, () -> {
+            boolean hasOrder = ctx.ASC() != null || ctx.DESC() != null;
+            boolean isAsc = ctx.DESC() == null;
+            Expression expression = typedVisit(ctx.expression());
+            return new GroupKeyWithOrder(expression, hasOrder, isAsc);
         });
     }
 
@@ -3132,8 +3175,10 @@ public class LogicalPlanBuilder extends DorisParserBaseVisitor<Object> {
             // from -> where -> group by -> having -> select
             LogicalPlan filter = withFilter(inputRelation, whereClause);
             SelectColumnClauseContext selectColumnCtx = selectClause.selectColumnClause();
-            LogicalPlan aggregate = withAggregate(filter, selectColumnCtx, aggClause);
+            List<OrderKey> orderKeys = Lists.newArrayList();
+            LogicalPlan aggregate = withAggregate(filter, selectColumnCtx, aggClause, orderKeys);
             boolean isDistinct = (selectClause.DISTINCT() != null);
+            LogicalPlan selectPlan;
             if (!(aggregate instanceof Aggregate) && havingClause.isPresent()) {
                 // create a project node for pattern match of ProjectToGlobalAggregate rule
                 // then ProjectToGlobalAggregate rule can insert agg node as LogicalHaving node's child
@@ -3149,12 +3194,16 @@ public class LogicalPlanBuilder extends DorisParserBaseVisitor<Object> {
                     List<NamedExpression> projects = getNamedExpressions(selectColumnCtx.namedExpressionSeq());
                     project = new LogicalProject<>(projects, ImmutableList.of(), isDistinct, aggregate);
                 }
-                return new LogicalHaving<>(ExpressionUtils.extractConjunctionToSet(
+                selectPlan = new LogicalHaving<>(ExpressionUtils.extractConjunctionToSet(
                         getExpression((havingClause.get().booleanExpression()))), project);
             } else {
                 LogicalPlan having = withHaving(aggregate, havingClause);
-                return withProjection(having, selectColumnCtx, aggClause, isDistinct);
+                selectPlan = withProjection(having, selectColumnCtx, aggClause, isDistinct);
             }
+            if (!orderKeys.isEmpty()) {
+                selectPlan = new LogicalSort<>(orderKeys, selectPlan);
+            }
+            return selectPlan;
         });
     }
 
@@ -3246,73 +3295,93 @@ public class LogicalPlanBuilder extends DorisParserBaseVisitor<Object> {
         return last;
     }
 
-    private LogicalPlan withSelectHint(LogicalPlan logicalPlan, List<ParserRuleContext> hintContexts) {
-        if (hintContexts.isEmpty()) {
+    private LogicalPlan withHints(LogicalPlan logicalPlan, List<ParserRuleContext> selectHintContexts,
+            List<ParserRuleContext> preAggOnHintContexts) {
+        if (selectHintContexts.isEmpty() && preAggOnHintContexts.isEmpty()) {
             return logicalPlan;
         }
-        Map<String, SelectHint> hints = Maps.newLinkedHashMap();
-        for (ParserRuleContext hintContext : hintContexts) {
-            SelectHintContext selectHintContext = (SelectHintContext) hintContext;
-            for (HintStatementContext hintStatement : selectHintContext.hintStatements) {
-                String hintName = hintStatement.hintName.getText().toLowerCase(Locale.ROOT);
-                switch (hintName) {
-                    case "set_var":
-                        Map<String, Optional<String>> parameters = Maps.newLinkedHashMap();
-                        for (HintAssignmentContext kv : hintStatement.parameters) {
-                            if (kv.key != null) {
-                                String parameterName = visitIdentifierOrText(kv.key);
-                                Optional<String> value = Optional.empty();
-                                if (kv.constantValue != null) {
-                                    Literal literal = (Literal) visit(kv.constantValue);
-                                    value = Optional.ofNullable(literal.toLegacyLiteral().getStringValue());
-                                } else if (kv.identifierValue != null) {
-                                    // maybe we should throw exception when the identifierValue is quoted identifier
-                                    value = Optional.ofNullable(kv.identifierValue.getText());
+        LogicalPlan newPlan = logicalPlan;
+        if (!selectHintContexts.isEmpty()) {
+            Map<String, SelectHint> hints = Maps.newLinkedHashMap();
+            for (ParserRuleContext hintContext : selectHintContexts) {
+                SelectHintContext selectHintContext = (SelectHintContext) hintContext;
+                for (HintStatementContext hintStatement : selectHintContext.hintStatements) {
+                    String hintName = hintStatement.hintName.getText().toLowerCase(Locale.ROOT);
+                    switch (hintName) {
+                        case "set_var":
+                            Map<String, Optional<String>> parameters = Maps.newLinkedHashMap();
+                            for (HintAssignmentContext kv : hintStatement.parameters) {
+                                if (kv.key != null) {
+                                    String parameterName = visitIdentifierOrText(kv.key);
+                                    Optional<String> value = Optional.empty();
+                                    if (kv.constantValue != null) {
+                                        Literal literal = (Literal) visit(kv.constantValue);
+                                        value = Optional.ofNullable(literal.toLegacyLiteral().getStringValue());
+                                    } else if (kv.identifierValue != null) {
+                                        // maybe we should throw exception when the identifierValue is quoted identifier
+                                        value = Optional.ofNullable(kv.identifierValue.getText());
+                                    }
+                                    parameters.put(parameterName, value);
                                 }
-                                parameters.put(parameterName, value);
                             }
-                        }
-                        hints.put(hintName, new SelectHintSetVar(hintName, parameters));
-                        break;
-                    case "leading":
-                        List<String> leadingParameters = new ArrayList<>();
-                        for (HintAssignmentContext kv : hintStatement.parameters) {
-                            if (kv.key != null) {
+                            hints.put(hintName, new SelectHintSetVar(hintName, parameters));
+                            break;
+                        case "leading":
+                            List<String> leadingParameters = new ArrayList<>();
+                            for (HintAssignmentContext kv : hintStatement.parameters) {
+                                if (kv.key != null) {
+                                    String parameterName = visitIdentifierOrText(kv.key);
+                                    leadingParameters.add(parameterName);
+                                }
+                            }
+                            hints.put(hintName, new SelectHintLeading(hintName, leadingParameters));
+                            break;
+                        case "ordered":
+                            hints.put(hintName, new SelectHintOrdered(hintName));
+                            break;
+                        case "use_cbo_rule":
+                            List<String> useRuleParameters = new ArrayList<>();
+                            for (HintAssignmentContext kv : hintStatement.parameters) {
+                                if (kv.key != null) {
+                                    String parameterName = visitIdentifierOrText(kv.key);
+                                    useRuleParameters.add(parameterName);
+                                }
+                            }
+                            hints.put(hintName, new SelectHintUseCboRule(hintName, useRuleParameters, false));
+                            break;
+                        case "no_use_cbo_rule":
+                            List<String> noUseRuleParameters = new ArrayList<>();
+                            for (HintAssignmentContext kv : hintStatement.parameters) {
                                 String parameterName = visitIdentifierOrText(kv.key);
-                                leadingParameters.add(parameterName);
+                                if (kv.key != null) {
+                                    noUseRuleParameters.add(parameterName);
+                                }
                             }
+                            hints.put(hintName, new SelectHintUseCboRule(hintName, noUseRuleParameters, true));
+                            break;
+                        default:
+                            break;
+                    }
+                }
+            }
+            newPlan = new LogicalSelectHint<>(hints, newPlan);
+        }
+        if (!preAggOnHintContexts.isEmpty()) {
+            for (ParserRuleContext hintContext : preAggOnHintContexts) {
+                if (hintContext instanceof SelectHintContext) {
+                    SelectHintContext preAggOnHintContext = (SelectHintContext) hintContext;
+                    if (preAggOnHintContext.hintStatement != null
+                            && preAggOnHintContext.hintStatement.hintName != null) {
+                        String text = preAggOnHintContext.hintStatement.hintName.getText();
+                        if (text.equalsIgnoreCase("PREAGGOPEN")) {
+                            newPlan = new LogicalPreAggOnHint<>(newPlan);
+                            break;
                         }
-                        hints.put(hintName, new SelectHintLeading(hintName, leadingParameters));
-                        break;
-                    case "ordered":
-                        hints.put(hintName, new SelectHintOrdered(hintName));
-                        break;
-                    case "use_cbo_rule":
-                        List<String> useRuleParameters = new ArrayList<>();
-                        for (HintAssignmentContext kv : hintStatement.parameters) {
-                            if (kv.key != null) {
-                                String parameterName = visitIdentifierOrText(kv.key);
-                                useRuleParameters.add(parameterName);
-                            }
-                        }
-                        hints.put(hintName, new SelectHintUseCboRule(hintName, useRuleParameters, false));
-                        break;
-                    case "no_use_cbo_rule":
-                        List<String> noUseRuleParameters = new ArrayList<>();
-                        for (HintAssignmentContext kv : hintStatement.parameters) {
-                            String parameterName = visitIdentifierOrText(kv.key);
-                            if (kv.key != null) {
-                                noUseRuleParameters.add(parameterName);
-                            }
-                        }
-                        hints.put(hintName, new SelectHintUseCboRule(hintName, noUseRuleParameters, true));
-                        break;
-                    default:
-                        break;
+                    }
                 }
             }
         }
-        return new LogicalSelectHint<>(hints, logicalPlan);
+        return newPlan;
     }
 
     @Override
@@ -3394,7 +3463,7 @@ public class LogicalPlanBuilder extends DorisParserBaseVisitor<Object> {
     }
 
     private LogicalPlan withAggregate(LogicalPlan input, SelectColumnClauseContext selectCtx,
-                                      Optional<AggClauseContext> aggCtx) {
+            Optional<AggClauseContext> aggCtx, List<OrderKey> orderKeys) {
         return input.optionalMap(aggCtx, () -> {
             GroupingElementContext groupingElementContext = aggCtx.get().groupingElement();
             List<NamedExpression> namedExpressions = getNamedExpressions(selectCtx.namedExpressionSeq());
@@ -3408,13 +3477,27 @@ public class LogicalPlanBuilder extends DorisParserBaseVisitor<Object> {
                 List<Expression> cubeExpressions = visit(groupingElementContext.expression(), Expression.class);
                 List<List<Expression>> groupingSets = ExpressionUtils.cubeToGroupingSets(cubeExpressions);
                 return new LogicalRepeat<>(groupingSets, namedExpressions, input);
-            } else if (groupingElementContext.ROLLUP() != null) {
+            } else if (groupingElementContext.ROLLUP() != null && groupingElementContext.WITH() == null) {
                 List<Expression> rollupExpressions = visit(groupingElementContext.expression(), Expression.class);
                 List<List<Expression>> groupingSets = ExpressionUtils.rollupToGroupingSets(rollupExpressions);
                 return new LogicalRepeat<>(groupingSets, namedExpressions, input);
             } else {
-                List<Expression> groupByExpressions = visit(groupingElementContext.expression(), Expression.class);
-                return new LogicalAggregate<>(groupByExpressions, namedExpressions, input);
+                List<GroupKeyWithOrder> groupKeyWithOrders = visit(groupingElementContext.expressionWithOrder(),
+                        GroupKeyWithOrder.class);
+                ImmutableList<Expression> groupByExpressions = groupKeyWithOrders.stream()
+                        .map(GroupKeyWithOrder::getExpr)
+                        .collect(ImmutableList.toImmutableList());
+                if (groupKeyWithOrders.stream().anyMatch(GroupKeyWithOrder::hasOrder)) {
+                    groupKeyWithOrders.stream()
+                            .map(e -> new OrderKey(e.getExpr(), e.isAsc(), e.isAsc()))
+                            .forEach(orderKeys::add);
+                }
+                if (groupingElementContext.ROLLUP() != null) {
+                    List<List<Expression>> groupingSets = ExpressionUtils.rollupToGroupingSets(groupByExpressions);
+                    return new LogicalRepeat<>(groupingSets, namedExpressions, input);
+                } else {
+                    return new LogicalAggregate<>(groupByExpressions, namedExpressions, input);
+                }
             }
         });
     }
@@ -3453,10 +3536,16 @@ public class LogicalPlanBuilder extends DorisParserBaseVisitor<Object> {
                     }
                     break;
                 case DorisParser.LIKE:
-                    outExpression = new Like(
-                        valueExpression,
-                        getExpression(ctx.pattern)
-                    );
+                    if (ctx.ESCAPE() == null) {
+                        outExpression = new Like(
+                                valueExpression,
+                                getExpression(ctx.pattern));
+                    } else {
+                        outExpression = new Like(
+                                valueExpression,
+                                getExpression(ctx.pattern),
+                                getExpression(ctx.escape));
+                    }
                     break;
                 case DorisParser.RLIKE:
                 case DorisParser.REGEXP:

@@ -88,7 +88,7 @@ VFileScanner::VFileScanner(
         RuntimeState* state, pipeline::FileScanLocalState* local_state, int64_t limit,
         std::shared_ptr<vectorized::SplitSourceConnector> split_source, RuntimeProfile* profile,
         ShardedKVCache* kv_cache,
-        std::unordered_map<std::string, ColumnValueRangeType>* colname_to_value_range,
+        const std::unordered_map<std::string, ColumnValueRangeType>* colname_to_value_range,
         const std::unordered_map<std::string, int>* colname_to_slot_id)
         : VScanner(state, local_state, limit, profile),
           _split_source(split_source),
@@ -721,9 +721,6 @@ Status VFileScanner::_get_next_reader() {
         // for compatibility, if format_type is not set in range, use the format type of params
         TFileFormatType::type format_type =
                 range.__isset.format_type ? range.format_type : _params->format_type;
-        // JNI reader can only push down column value range
-        bool push_down_predicates =
-                !_is_load && _params->format_type != TFileFormatType::FORMAT_JNI;
         // for compatibility, this logic is deprecated in 3.1
         if (format_type == TFileFormatType::FORMAT_JNI && range.__isset.table_format_params) {
             if (range.table_format_params.table_format_type == "paimon" &&
@@ -739,6 +736,8 @@ Status VFileScanner::_get_next_reader() {
                 }
             }
         }
+        // JNI reader can only push down column value range
+        bool push_down_predicates = !_is_load && format_type != TFileFormatType::FORMAT_JNI;
         bool need_to_get_parsed_schema = false;
         switch (format_type) {
         case TFileFormatType::FORMAT_JNI: {
@@ -881,7 +880,7 @@ Status VFileScanner::_get_next_reader() {
             } else if (range.__isset.table_format_params &&
                        range.table_format_params.table_format_type == "paimon") {
                 init_status = orc_reader->init_reader(
-                        &_file_col_names, _colname_to_value_range, _push_down_conjuncts, false,
+                        &_file_col_names, {}, _colname_to_value_range, _push_down_conjuncts, false,
                         _real_tuple_desc, _default_val_row_desc.get(),
                         &_not_single_slot_filter_conjuncts, &_slot_id_to_filter_conjuncts);
                 std::unique_ptr<PaimonOrcReader> paimon_reader =
@@ -897,7 +896,7 @@ Status VFileScanner::_get_next_reader() {
                     hive_orc_use_column_names = _state->query_options().hive_orc_use_column_names;
                 }
                 init_status = orc_reader->init_reader(
-                        &_file_col_names, _colname_to_value_range, _push_down_conjuncts, false,
+                        &_file_col_names, {}, _colname_to_value_range, _push_down_conjuncts, false,
                         _real_tuple_desc, _default_val_row_desc.get(),
                         &_not_single_slot_filter_conjuncts, &_slot_id_to_filter_conjuncts,
                         hive_orc_use_column_names);
@@ -1186,10 +1185,18 @@ void VFileScanner::try_stop() {
 
 void VFileScanner::_collect_profile_before_close() {
     VScanner::_collect_profile_before_close();
-    if (config::enable_file_cache && _state->query_options().enable_file_cache &&
-        _profile != nullptr) {
-        io::FileCacheProfileReporter cache_profile(_profile);
-        cache_profile.update(_file_cache_statistics.get());
+    if (config::enable_file_cache && _state->query_options().enable_file_cache) {
+        if (_profile != nullptr) {
+            io::FileCacheProfileReporter cache_profile(_profile);
+            cache_profile.update(_file_cache_statistics.get());
+        }
+
+        if (_query_statistics) {
+            _query_statistics->add_scan_bytes_from_local_storage(
+                    _file_cache_statistics->bytes_read_from_local);
+            _query_statistics->add_scan_bytes_from_remote_storage(
+                    _file_cache_statistics->bytes_read_from_remote);
+        }
     }
 
     if (_cur_reader != nullptr) {

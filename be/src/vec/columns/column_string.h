@@ -151,6 +151,10 @@ public:
             const auto& real_field = vectorized::get<const JsonbField&>(x);
             s = StringRef(real_field.get_value(), real_field.get_size());
         } else {
+            DCHECK_EQ(x.get_type(), Field::Types::String);
+            // If `x.get_type()` is not String, such as UInt64, may get the error
+            // `string column length is too large: total_length=13744632839234567870`
+            // because `<String>(x).size() = 13744632839234567870`
             s.data = vectorized::get<const String&>(x).data();
             s.size = vectorized::get<const String&>(x).size();
         }
@@ -161,6 +165,8 @@ public:
         check_chars_length(new_size, old_size + 1);
 
         chars.resize(new_size);
+        DCHECK(s.data != nullptr);
+        DCHECK(chars.data() != nullptr);
         memcpy(chars.data() + old_size, s.data, size_to_append);
         offsets.push_back(new_size);
         sanity_check_simple();

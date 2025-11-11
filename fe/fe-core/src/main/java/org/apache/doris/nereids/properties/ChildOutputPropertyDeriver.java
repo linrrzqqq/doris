@@ -168,6 +168,10 @@ public class ChildOutputPropertyDeriver extends PlanVisitor<PhysicalProperties, 
 
     @Override
     public PhysicalProperties visitPhysicalOlapScan(PhysicalOlapScan olapScan, PlanContext context) {
+        // make sure only one fragment when use point query
+        if (context.getStatementContext().isShortCircuitQuery() && olapScan.getSelectedTabletIds().size() == 1) {
+            return PhysicalProperties.GATHER;
+        }
         return new PhysicalProperties(olapScan.getDistributionSpec());
     }
 
@@ -367,9 +371,8 @@ public class ChildOutputPropertyDeriver extends PlanVisitor<PhysicalProperties, 
             if (!groupingSets.isEmpty()) {
                 Set<Expression> intersectGroupingKeys = Utils.fastToImmutableSet(groupingSets.get(0));
                 for (int i = 1; i < groupingSets.size() && !intersectGroupingKeys.isEmpty(); i++) {
-                    intersectGroupingKeys = Sets.intersection(
-                            intersectGroupingKeys, Utils.fastToImmutableSet(groupingSets.get(i))
-                    );
+                    intersectGroupingKeys = Sets.intersection(intersectGroupingKeys,
+                            Utils.fastToImmutableSet(groupingSets.get(i))).immutableCopy();
                 }
                 List<ExprId> orderedShuffledColumns = distributionSpecHash.getOrderedShuffledColumns();
                 if (!intersectGroupingKeys.isEmpty() && intersectGroupingKeys.size()

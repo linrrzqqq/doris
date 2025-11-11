@@ -46,6 +46,7 @@ import org.apache.doris.common.ErrorCode;
 import org.apache.doris.common.ErrorReport;
 import org.apache.doris.common.Pair;
 import org.apache.doris.common.io.Writable;
+import org.apache.doris.common.util.DebugPointUtil;
 import org.apache.doris.common.util.MasterDaemon;
 import org.apache.doris.common.util.TimeUtils;
 import org.apache.doris.fs.FileSystemFactory;
@@ -397,6 +398,14 @@ public class BackupHandler extends MasterDaemon implements Writable {
             db.readUnlock();
         }
 
+        while (DebugPointUtil.isEnable("BackupHandler.backup.block")) {
+            try {
+                Thread.sleep(100);
+            } catch (InterruptedException e) {
+                LOG.info("error ", e);
+            }
+        }
+
         List<TableRef> tblRefs = Lists.newArrayList();
         if (abstractBackupTableRefClause != null && !abstractBackupTableRefClause.isExclude()) {
             tblRefs = abstractBackupTableRefClause.getTableRefList();
@@ -504,9 +513,7 @@ public class BackupHandler extends MasterDaemon implements Writable {
     private void restore(Repository repository, Database db, RestoreStmt stmt) throws DdlException {
         BackupJobInfo jobInfo;
         if (stmt.isLocal()) {
-            String jobInfoString = new String(stmt.getJobInfo());
-            jobInfo = BackupJobInfo.genFromJson(jobInfoString);
-
+            jobInfo = stmt.getJobInfo();
             if (jobInfo.extraInfo == null) {
                 ErrorReport.reportDdlException(ErrorCode.ERR_COMMON_ERROR, "Invalid job extra info empty");
             }
@@ -542,13 +549,7 @@ public class BackupHandler extends MasterDaemon implements Writable {
                 metaVersion = jobInfo.metaVersion;
             }
 
-            BackupMeta backupMeta;
-            try {
-                backupMeta = BackupMeta.fromBytes(stmt.getMeta(), metaVersion);
-            } catch (IOException e) {
-                LOG.warn("read backup meta failed, current meta version {}", Env.getCurrentEnvJournalVersion(), e);
-                throw new DdlException("read backup meta failed", e);
-            }
+            BackupMeta backupMeta = stmt.getMeta();
             String backupTimestamp = TimeUtils.longToTimeString(
                     jobInfo.getBackupTime(), TimeUtils.getDatetimeFormatWithHyphenWithTimeZone());
             restoreJob = new RestoreJob(stmt.getLabel(), backupTimestamp,

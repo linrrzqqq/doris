@@ -119,6 +119,37 @@ TEST(MathFunctionTest, cbrt_test) {
     static_cast<void>(check_function<DataTypeFloat64, true>(func_name, input_types, data_set));
 }
 
+TEST(MathFunctionTest, cot_test) {
+    std::string func_name = "cot";
+
+    InputTypeSet input_types = {TypeIndex::Float64};
+
+    DataSet data_set = {{{1.0}, 0.6420926159343306}, {{M_PI / 4}, 1.0000000000000002}};
+
+    static_cast<void>(check_function<DataTypeFloat64, true>(func_name, input_types, data_set));
+}
+
+TEST(MathFunctionTest, sec_test) {
+    std::string func_name = "sec";
+
+    InputTypeSet input_types = {TypeIndex::Float64};
+
+    DataSet data_set = {{{1.0}, 1.8508157176809255}, {{1000.0}, 1.7781600385912715}};
+
+    static_cast<void>(check_function<DataTypeFloat64, true>(func_name, input_types, data_set));
+}
+
+TEST(MathFunctionTest, cosec_test) {
+    std::string func_name = "cosec";
+
+    InputTypeSet input_types = {TypeIndex::Float64};
+
+    DataSet data_set = {
+            {{1.0}, 1.1883951057781212}, {{2.0}, 1.0997501702946164}, {{1000.0}, 1.20936599707935}};
+
+    static_cast<void>(check_function<DataTypeFloat64, true>(func_name, input_types, data_set));
+}
+
 TEST(MathFunctionTest, tan_test) {
     std::string func_name = "tan"; //tan(x)
 
@@ -520,6 +551,65 @@ TEST(MathFunctionTest, money_format_test) {
         DataSet data_set = {{{Null()}, Null()},
                             {{DECIMAL64(17014116, 670000000)}, VARCHAR("17,014,116.67")},
                             {{DECIMAL64(-17014116, -670000000)}, VARCHAR("-17,014,116.67")}};
+
+        check_function_all_arg_comb<DataTypeString, true>(func_name, input_types, data_set);
+    }
+}
+
+TEST(MathFunctionTest, format_round_test) {
+    std::string func_name = "format_round";
+
+    {
+        InputTypeSet input_types = {TypeIndex::Int64, TypeIndex::Int32};
+        DataSet data_set = {{{Null(), INT(2)}, Null()},
+                            {{BIGINT(17014116), INT(2)}, VARCHAR("17,014,116.00")},
+                            {{BIGINT(-17014116), INT(2)}, VARCHAR("-17,014,116.00")},
+                            {{BIGINT(1), INT(0)}, VARCHAR("1")},
+                            {{BIGINT(123456), INT(0)}, VARCHAR("123,456")},
+                            {{BIGINT(123456), INT(3)}, VARCHAR("123,456.000")},
+                            {{BIGINT(123456), INT(10)}, VARCHAR("123,456.0000000000")},
+                            {{BIGINT(123456), INT(20)}, VARCHAR("123,456.00000000000000000000")}};
+
+        static_cast<void>(check_function<DataTypeString, true>(func_name, input_types, data_set));
+    }
+    {
+        InputTypeSet input_types = {TypeIndex::Int128, TypeIndex::Int32};
+        DataSet data_set = {
+                {{Null(), INT(2)}, Null()},
+                {{LARGEINT(17014116), INT(2)}, VARCHAR("17,014,116.00")},
+                {{LARGEINT(-17014116), INT(2)}, VARCHAR("-17,014,116.00")},
+                {{LARGEINT(1), INT(0)}, VARCHAR("1")},
+                {{LARGEINT(123456), INT(0)}, VARCHAR("123,456")},
+                {{LARGEINT(123456), INT(3)}, VARCHAR("123,456.000")},
+                {{LARGEINT(123456), INT(10)}, VARCHAR("123,456.0000000000")},
+                {{LARGEINT(123456), INT(20)}, VARCHAR("123,456.00000000000000000000")},
+                {{LARGEINT(123456789123456789), INT(2)}, VARCHAR("123,456,789,123,456,789.00")}};
+
+        static_cast<void>(check_function<DataTypeString, true>(func_name, input_types, data_set));
+    }
+    {
+        InputTypeSet input_types = {TypeIndex::Float64, TypeIndex::Int32};
+        DataSet data_set = {{{Null(), INT(2)}, Null()},
+                            {{DOUBLE(17014116.67), INT(2)}, VARCHAR("17,014,116.67")},
+                            {{DOUBLE(-17014116.67), INT(2)}, VARCHAR("-17,014,116.67")},
+                            {{DOUBLE(-123.45), INT(2)}, VARCHAR("-123.45")}};
+
+        static_cast<void>(check_function<DataTypeString, true>(func_name, input_types, data_set));
+    }
+    {
+        InputTypeSet input_types = {TypeIndex::Decimal128V2, TypeIndex::Int32};
+        DataSet data_set = {{{Null(), INT(2)}, Null()},
+                            {{DECIMALV2(17014116.67), INT(2)}, VARCHAR("17,014,116.67")},
+                            {{DECIMALV2(-17014116.67), INT(2)}, VARCHAR("-17,014,116.67")}};
+
+        static_cast<void>(check_function<DataTypeString, true>(func_name, input_types, data_set));
+    }
+    {
+        BaseInputTypeSet input_types = {TypeIndex::Decimal64, TypeIndex::Int32};
+        DataSet data_set = {
+                {{Null(), INT(2)}, Null()},
+                {{DECIMAL64(17014116, 670000000), INT(2)}, VARCHAR("17,014,116.67")},
+                {{DECIMAL64(-17014116, -670000000), INT(2)}, VARCHAR("-17,014,116.67")}};
 
         check_function_all_arg_comb<DataTypeString, true>(func_name, input_types, data_set);
     }

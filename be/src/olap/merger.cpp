@@ -68,7 +68,7 @@ Status Merger::vmerge_rowsets(BaseTabletSPtr tablet, ReaderType reader_type,
     reader_params.tablet = tablet;
     reader_params.reader_type = reader_type;
 
-    TabletReader::ReadSource read_source;
+    TabletReadSource read_source;
     read_source.rs_splits.reserve(src_rowset_readers.size());
     for (const RowsetReaderSharedPtr& rs_reader : src_rowset_readers) {
         read_source.rs_splits.emplace_back(rs_reader);
@@ -87,7 +87,7 @@ Status Merger::vmerge_rowsets(BaseTabletSPtr tablet, ReaderType reader_type,
     }
     reader_params.tablet_schema = merge_tablet_schema;
     if (!tablet->tablet_schema()->cluster_key_idxes().empty()) {
-        reader_params.delete_bitmap = &tablet->tablet_meta()->delete_bitmap();
+        reader_params.delete_bitmap = tablet->tablet_meta()->delete_bitmap();
     }
 
     if (stats_output && stats_output->rowid_conversion) {
@@ -139,6 +139,13 @@ Status Merger::vmerge_rowsets(BaseTabletSPtr tablet, ReaderType reader_type,
         stats_output->output_rows = output_rows;
         stats_output->merged_rows = reader.merged_rows();
         stats_output->filtered_rows = reader.filtered_rows();
+        stats_output->bytes_read_from_local = reader.stats().file_cache_stats.bytes_read_from_local;
+        stats_output->bytes_read_from_remote =
+                reader.stats().file_cache_stats.bytes_read_from_remote;
+        stats_output->cached_bytes_total = reader.stats().file_cache_stats.bytes_write_into_cache;
+        stats_output->cloud_local_read_time = reader.stats().file_cache_stats.local_io_timer / 1000;
+        stats_output->cloud_remote_read_time =
+                reader.stats().file_cache_stats.remote_io_timer / 1000;
     }
 
     RETURN_NOT_OK_STATUS_WITH_WARN(dst_rowset_writer->flush(),
@@ -242,7 +249,7 @@ Status Merger::vertical_compact_one_group(
     reader_params.tablet = tablet;
     reader_params.reader_type = reader_type;
 
-    TabletReader::ReadSource read_source;
+    TabletReadSource read_source;
     read_source.rs_splits.reserve(src_rowset_readers.size());
     for (const RowsetReaderSharedPtr& rs_reader : src_rowset_readers) {
         read_source.rs_splits.emplace_back(rs_reader);
@@ -261,7 +268,7 @@ Status Merger::vertical_compact_one_group(
 
     reader_params.tablet_schema = merge_tablet_schema;
     if (!tablet->tablet_schema()->cluster_key_idxes().empty()) {
-        reader_params.delete_bitmap = &tablet->tablet_meta()->delete_bitmap();
+        reader_params.delete_bitmap = tablet->tablet_meta()->delete_bitmap();
     }
 
     if (is_key && stats_output && stats_output->rowid_conversion) {
@@ -312,6 +319,13 @@ Status Merger::vertical_compact_one_group(
         stats_output->output_rows = output_rows;
         stats_output->merged_rows = reader.merged_rows();
         stats_output->filtered_rows = reader.filtered_rows();
+        stats_output->bytes_read_from_local = reader.stats().file_cache_stats.bytes_read_from_local;
+        stats_output->bytes_read_from_remote =
+                reader.stats().file_cache_stats.bytes_read_from_remote;
+        stats_output->cached_bytes_total = reader.stats().file_cache_stats.bytes_write_into_cache;
+        stats_output->cloud_local_read_time = reader.stats().file_cache_stats.local_io_timer / 1000;
+        stats_output->cloud_remote_read_time =
+                reader.stats().file_cache_stats.remote_io_timer / 1000;
     }
     RETURN_IF_ERROR(dst_rowset_writer->flush_columns(is_key));
 
@@ -356,6 +370,12 @@ Status Merger::vertical_compact_one_group(
         stats_output->output_rows = output_rows;
         stats_output->merged_rows = src_block_reader.merged_rows();
         stats_output->filtered_rows = src_block_reader.filtered_rows();
+        stats_output->bytes_read_from_local =
+                src_block_reader.stats().file_cache_stats.bytes_read_from_local;
+        stats_output->bytes_read_from_remote =
+                src_block_reader.stats().file_cache_stats.bytes_read_from_remote;
+        stats_output->cached_bytes_total =
+                src_block_reader.stats().file_cache_stats.bytes_write_into_cache;
     }
 
     // segcompaction produce only one segment at once

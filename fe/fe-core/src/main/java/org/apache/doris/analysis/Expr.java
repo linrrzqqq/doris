@@ -95,9 +95,6 @@ public abstract class Expr extends TreeNode<Expr> implements ParseNode, Cloneabl
     public static final String DEFAULT_EXPR_NAME = "expr";
 
     protected boolean disableTableName = false;
-    protected boolean needExternalSql = false;
-    protected TableType tableType = null;
-    protected TableIf inputTable = null;
 
     // to be used where we can't come up with a better estimate
     public static final double DEFAULT_SELECTIVITY = 0.1;
@@ -922,31 +919,26 @@ public abstract class Expr extends TreeNode<Expr> implements ParseNode, Cloneabl
     }
 
     public String toSql() {
+        if (disableTableName) {
+            return toSqlWithoutTbl();
+        }
         return (printSqlInParens) ? "(" + toSqlImpl() + ")" : toSqlImpl();
     }
 
-    public void setDisableTableName(boolean value) {
-        disableTableName = value;
-        for (Expr child : children) {
-            child.setDisableTableName(value);
-        }
+    public String toSql(boolean disableTableName, boolean needExternalSql, TableType tableType, TableIf table) {
+        return (printSqlInParens) ? "(" + toSqlImpl(disableTableName, needExternalSql, tableType, table) + ")"
+                : toSqlImpl(disableTableName, needExternalSql, tableType, table);
     }
 
-    public void setExternalContext(boolean needExternalSql, TableType tableType, TableIf inputTable) {
-        this.needExternalSql = needExternalSql;
-        this.tableType = tableType;
-        this.inputTable = inputTable;
-
+    public void disableTableName() {
+        disableTableName = true;
         for (Expr child : children) {
-            child.setExternalContext(needExternalSql, tableType, inputTable);
+            child.disableTableName();
         }
     }
 
     public String toSqlWithoutTbl() {
-        setDisableTableName(true);
-        String result = toSql();
-        setDisableTableName(false);
-        return result;
+        return toSql(true, false, null, null);
     }
 
     public String toDigest() {
@@ -959,6 +951,9 @@ public abstract class Expr extends TreeNode<Expr> implements ParseNode, Cloneabl
      */
     protected abstract String toSqlImpl();
 
+    protected abstract String toSqlImpl(boolean disableTableName, boolean needExternalSql, TableType tableType,
+            TableIf table);
+
     /**
      * !!!!!! Important !!!!!!
      * Subclasses should override this method if
@@ -969,10 +964,7 @@ public abstract class Expr extends TreeNode<Expr> implements ParseNode, Cloneabl
     }
 
     public String toExternalSql(TableType tableType, TableIf table) {
-        setExternalContext(true, tableType, table);
-        String result = toSql();
-        setExternalContext(false, null, null);
-        return result;
+        return toSql(false, true, tableType, table);
     }
 
     /**
@@ -2185,21 +2177,33 @@ public abstract class Expr extends TreeNode<Expr> implements ParseNode, Cloneabl
         return "";
     }
 
-    public String getStringValueInFe(FormatOptions options) {
+    /**
+     * This method is used for constant fold of query in FE,
+     * for different serde dialect(hive, presto, doris).
+     */
+    public String getStringValueForQuery(FormatOptions options) {
         return getStringValue();
     }
 
+    /**
+     * This method is to return the string value of this expr in a complex type for query
+     * It is only used for "getStringValueForQuery()"
+     * For most of the integer types, it is same as getStringValueForQuery().
+     * But for others like StringLiteral and DateLiteral, it should be wrapped with quotations.
+     * eg: 1,2,abc,[1,2,3],["abc","def"],{10:20},{"abc":20}
+     */
+    protected String getStringValueInComplexTypeForQuery(FormatOptions options) {
+        return getStringValueForQuery(options);
+    }
+
+    /**
+     * This method is to return the string value of this expr for stream load.
+     * so there is a little different from "getStringValueForQuery()".
+     * eg, for NullLiteral, it should be "\N" for stream load, but "null" for FE constant
+     * for StructLiteral, the value should not contain sub column's name.
+     */
     public String getStringValueForStreamLoad(FormatOptions options) {
-        return getStringValue();
-    }
-
-    // A special method only for array literal, all primitive type in array
-    // will be wrapped by double quote. eg:
-    // ["1", "2", "3"]
-    // ["a", "b", "c"]
-    // [["1", "2", "3"], ["1"], ["3"]]
-    public String getStringValueForArray(FormatOptions options) {
-        return null;
+        return getStringValueForQuery(options);
     }
 
     public final TExpr normalize(Normalizer normalizer) {

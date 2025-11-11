@@ -57,6 +57,7 @@
 #include "olap/base_tablet.h"
 #include "olap/cold_data_compaction.h"
 #include "olap/compaction_permit_limiter.h"
+#include "olap/cumulative_compaction.h"
 #include "olap/cumulative_compaction_policy.h"
 #include "olap/cumulative_compaction_time_series_policy.h"
 #include "olap/data_dir.h"
@@ -81,6 +82,7 @@
 #include "util/debug_points.h"
 #include "util/doris_metrics.h"
 #include "util/mem_info.h"
+#include "util/metrics.h"
 #include "util/thread.h"
 #include "util/threadpool.h"
 #include "util/thrift_rpc_helper.h"
@@ -96,6 +98,8 @@ using io::Path;
 
 // number of running SCHEMA-CHANGE threads
 volatile uint32_t g_schema_change_active_threads = 0;
+bvar::Status<int64_t> g_cumu_compaction_task_num_per_round("cumu_compaction_task_num_per_round", 0);
+bvar::Status<int64_t> g_base_compaction_task_num_per_round("base_compaction_task_num_per_round", 0);
 
 static const uint64_t DEFAULT_SEED = 104729;
 static const uint64_t MOD_PRIME = 7652413;
@@ -186,7 +190,8 @@ CompactionSubmitRegistry::TabletSet& CompactionSubmitRegistry::_get_tablet_set(
 static int32_t get_cumu_compaction_threads_num(size_t data_dirs_num) {
     int32_t threads_num = config::max_cumu_compaction_threads;
     if (threads_num == -1) {
-        threads_num = data_dirs_num;
+        int num_cores = doris::CpuInfo::num_cores();
+        threads_num = std::max<size_t>(data_dirs_num, num_cores / 6);
     }
     threads_num = threads_num <= 0 ? 1 : threads_num;
     return threads_num;
@@ -464,9 +469,17 @@ void StorageEngine::_path_gc_thread_callback(DataDir* data_dir) {
         int32_t current_time = time(nullptr);
 
         int32_t interval = _auto_get_interval_by_disk_capacity(data_dir);
+        DBUG_EXECUTE_IF("_path_gc_thread_callback.interval.eq.1ms", {
+            LOG(INFO) << "debug point change interval eq 1ms";
+            interval = 1;
+            while (DebugPoints::instance()->is_enable("_path_gc_thread_callback.always.do")) {
+                data_dir->perform_path_gc();
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+        });
         if (interval <= 0) {
             LOG(WARNING) << "path gc thread check interval config is illegal:" << interval
-                         << "will be forced set to half hour";
+                         << " will be forced set to half hour";
             interval = 1800; // 0.5 hour
         }
         if (current_time - last_exec_time >= interval) {
@@ -482,8 +495,9 @@ void StorageEngine::_path_gc_thread_callback(DataDir* data_dir) {
 void StorageEngine::_tablet_checkpoint_callback(const std::vector<DataDir*>& data_dirs) {
     int64_t interval = config::generate_tablet_meta_checkpoint_tasks_interval_secs;
     do {
-        LOG(INFO) << "begin to produce tablet meta checkpoint tasks.";
         for (auto data_dir : data_dirs) {
+            LOG(INFO) << "begin to produce tablet meta checkpoint tasks, data_dir="
+                      << data_dir->path();
             auto st = _tablet_meta_checkpoint_thread_pool->submit_func(
                     [data_dir, this]() { _tablet_manager->do_tablet_meta_checkpoint(data_dir); });
             if (!st.ok()) {
@@ -572,6 +586,7 @@ void StorageEngine::_tablet_path_check_callback() {
 }
 
 void StorageEngine::_adjust_compaction_thread_num() {
+    TEST_SYNC_POINT_RETURN_WITH_VOID("StorageEngine::_adjust_compaction_thread_num.return_void");
     auto base_compaction_threads_num = get_base_compaction_threads_num(_store_map.size());
     if (_base_compaction_thread_pool->max_threads() != base_compaction_threads_num) {
         int old_max_threads = _base_compaction_thread_pool->max_threads();
@@ -652,6 +667,7 @@ void StorageEngine::_compaction_tasks_producer_callback() {
 
     int64_t interval = config::generate_compaction_tasks_interval_ms;
     do {
+        int64_t cur_time = UnixMillis();
         if (!config::disable_auto_compaction &&
             (!config::enable_compaction_pause_on_high_memory ||
              !GlobalMemoryArbitrator::is_exceed_soft_mem_limit(GB_EXCHANGE_BYTE))) {
@@ -674,6 +690,33 @@ void StorageEngine::_compaction_tasks_producer_callback() {
                     last_base_score_update_time = cur_time;
                 }
             }
+            std::unique_ptr<ThreadPool>& thread_pool =
+                    (compaction_type == CompactionType::CUMULATIVE_COMPACTION)
+                            ? _cumu_compaction_thread_pool
+                            : _base_compaction_thread_pool;
+            bvar::Status<int64_t>& g_compaction_task_num_per_round =
+                    (compaction_type == CompactionType::CUMULATIVE_COMPACTION)
+                            ? g_cumu_compaction_task_num_per_round
+                            : g_base_compaction_task_num_per_round;
+            if (config::compaction_num_per_round != -1) {
+                _compaction_num_per_round = config::compaction_num_per_round;
+            } else if (thread_pool->get_queue_size() == 0) {
+                // If all tasks in the thread pool queue are executed,
+                // double the number of tasks generated each time,
+                // with a maximum of config::max_automatic_compaction_num_per_round tasks per generation.
+                if (_compaction_num_per_round < config::max_automatic_compaction_num_per_round) {
+                    _compaction_num_per_round *= 2;
+                    g_compaction_task_num_per_round.set_value(_compaction_num_per_round);
+                }
+            } else if (thread_pool->get_queue_size() > _compaction_num_per_round / 2) {
+                // If all tasks in the thread pool is greater than
+                // half of the tasks submitted in the previous round,
+                // reduce the number of tasks generated each time by half, with a minimum of 1.
+                if (_compaction_num_per_round > 1) {
+                    _compaction_num_per_round /= 2;
+                    g_compaction_task_num_per_round.set_value(_compaction_num_per_round);
+                }
+            }
             std::vector<TabletSharedPtr> tablets_compaction =
                     _generate_compaction_tasks(compaction_type, data_dirs, check_score);
             if (tablets_compaction.size() == 0) {
@@ -690,6 +733,10 @@ void StorageEngine::_compaction_tasks_producer_callback() {
             for (const auto& tablet : tablets_compaction) {
                 if (compaction_type == CompactionType::BASE_COMPACTION) {
                     tablet->set_last_base_compaction_schedule_time(UnixMillis());
+                } else if (compaction_type == CompactionType::CUMULATIVE_COMPACTION) {
+                    tablet->set_last_cumu_compaction_schedule_time(UnixMillis());
+                } else if (compaction_type == CompactionType::FULL_COMPACTION) {
+                    tablet->set_last_full_compaction_schedule_time(UnixMillis());
                 }
                 Status st = _submit_compaction_task(tablet, compaction_type, false);
                 if (!st.ok()) {
@@ -701,6 +748,17 @@ void StorageEngine::_compaction_tasks_producer_callback() {
         } else {
             interval = 5000; // 5s to check disable_auto_compaction
         }
+
+        // wait some seconds for ut test
+        {
+            std ::vector<std ::any> args {};
+            args.emplace_back(1);
+            doris ::SyncPoint ::get_instance()->process(
+                    "StorageEngine::_compaction_tasks_producer_callback", std ::move(args));
+        }
+        int64_t end_time = UnixMillis();
+        DorisMetrics::instance()->compaction_producer_callback_a_round_time->set_value(end_time -
+                                                                                       cur_time);
     } while (!_stop_background_threads_latch.wait_for(std::chrono::milliseconds(interval)));
 }
 
@@ -918,6 +976,8 @@ bool has_free_compaction_slot(CompactionSubmitRegistry* registry, DataDir* dir,
 
 std::vector<TabletSharedPtr> StorageEngine::_generate_compaction_tasks(
         CompactionType compaction_type, std::vector<DataDir*>& data_dirs, bool check_score) {
+    TEST_SYNC_POINT_RETURN_WITH_VALUE("olap_server::_generate_compaction_tasks.return_empty",
+                                      std::vector<TabletSharedPtr> {});
     _update_cumulative_compaction_policy();
     std::vector<TabletSharedPtr> tablets_compaction;
     uint32_t max_compaction_score = 0;
@@ -1039,13 +1099,85 @@ Status StorageEngine::_submit_compaction_task(TabletSharedPtr tablet,
                       << ", num_total_queued_tasks: " << thread_pool->get_queue_size();
         auto st = thread_pool->submit_func([tablet, compaction = std::move(compaction),
                                             compaction_type, permits, force, this]() {
+            if (compaction_type == CompactionType::CUMULATIVE_COMPACTION) [[likely]] {
+                DorisMetrics::instance()->cumulative_compaction_task_running_total->increment(1);
+                DorisMetrics::instance()->cumulative_compaction_task_pending_total->set_value(
+                        _cumu_compaction_thread_pool->get_queue_size());
+            } else if (compaction_type == CompactionType::BASE_COMPACTION) {
+                DorisMetrics::instance()->base_compaction_task_running_total->increment(1);
+                DorisMetrics::instance()->base_compaction_task_pending_total->set_value(
+                        _base_compaction_thread_pool->get_queue_size());
+            }
+            bool is_large_task = true;
             Defer defer {[&]() {
+                DBUG_EXECUTE_IF("StorageEngine._submit_compaction_task.sleep", { sleep(5); })
                 if (!force) {
                     _permit_limiter.release(permits);
                 }
                 _pop_tablet_from_submitted_compaction(tablet, compaction_type);
                 tablet->compaction_stage = CompactionStage::NOT_SCHEDULED;
+                if (compaction_type == CompactionType::CUMULATIVE_COMPACTION) {
+                    std::lock_guard<std::mutex> lock(_cumu_compaction_delay_mtx);
+                    _cumu_compaction_thread_pool_used_threads--;
+                    if (!is_large_task) {
+                        _cumu_compaction_thread_pool_small_tasks_running--;
+                    }
+                    DorisMetrics::instance()->cumulative_compaction_task_running_total->increment(
+                            -1);
+                    DorisMetrics::instance()->cumulative_compaction_task_pending_total->set_value(
+                            _cumu_compaction_thread_pool->get_queue_size());
+                } else if (compaction_type == CompactionType::BASE_COMPACTION) {
+                    DorisMetrics::instance()->base_compaction_task_running_total->increment(-1);
+                    DorisMetrics::instance()->base_compaction_task_pending_total->set_value(
+                            _base_compaction_thread_pool->get_queue_size());
+                }
             }};
+            do {
+                if (compaction->compaction_type() == ReaderType::READER_CUMULATIVE_COMPACTION) {
+                    std::lock_guard<std::mutex> lock(_cumu_compaction_delay_mtx);
+                    _cumu_compaction_thread_pool_used_threads++;
+                    if (config::large_cumu_compaction_task_min_thread_num > 1 &&
+                        _cumu_compaction_thread_pool->max_threads() >=
+                                config::large_cumu_compaction_task_min_thread_num) {
+                        // Determine if this is a large task based on configured thresholds
+                        is_large_task =
+                                (compaction->calc_input_rowsets_total_size() >
+                                         config::large_cumu_compaction_task_bytes_threshold ||
+                                 compaction->calc_input_rowsets_row_num() >
+                                         config::large_cumu_compaction_task_row_num_threshold);
+
+                        // Small task. No delay needed
+                        if (!is_large_task) {
+                            _cumu_compaction_thread_pool_small_tasks_running++;
+                            break;
+                        }
+                        // Deal with large task
+                        if (_should_delay_large_task()) {
+                            LOG_WARNING(
+                                    "failed to do CumulativeCompaction, cumu thread pool is "
+                                    "intensive, delay large task.")
+                                    .tag("tablet_id", tablet->tablet_id())
+                                    .tag("input_rows", compaction->calc_input_rowsets_row_num())
+                                    .tag("input_rowsets_total_size",
+                                         compaction->calc_input_rowsets_total_size())
+                                    .tag("config::large_cumu_compaction_task_bytes_threshold",
+                                         config::large_cumu_compaction_task_bytes_threshold)
+                                    .tag("config::large_cumu_compaction_task_row_num_threshold",
+                                         config::large_cumu_compaction_task_row_num_threshold)
+                                    .tag("remaining threads",
+                                         _cumu_compaction_thread_pool_used_threads)
+                                    .tag("small_tasks_running",
+                                         _cumu_compaction_thread_pool_small_tasks_running);
+                            // Delay this task and sleep 5s for this tablet
+                            long now = duration_cast<std::chrono::milliseconds>(
+                                               std::chrono::system_clock::now().time_since_epoch())
+                                               .count();
+                            tablet->set_last_cumu_compaction_failure_time(now);
+                            return;
+                        }
+                    }
+                }
+            } while (false);
             if (!tablet->can_do_compaction(tablet->data_dir()->path_hash(), compaction_type)) {
                 LOG(INFO) << "Tablet state has been changed, no need to begin this compaction "
                              "task, tablet_id="
@@ -1056,6 +1188,13 @@ Status StorageEngine::_submit_compaction_task(TabletSharedPtr tablet,
             TEST_SYNC_POINT_RETURN_WITH_VOID("olap_server::execute_compaction");
             tablet->execute_compaction(*compaction);
         });
+        if (compaction_type == CompactionType::CUMULATIVE_COMPACTION) [[likely]] {
+            DorisMetrics::instance()->cumulative_compaction_task_pending_total->set_value(
+                    _cumu_compaction_thread_pool->get_queue_size());
+        } else if (compaction_type == CompactionType::BASE_COMPACTION) {
+            DorisMetrics::instance()->base_compaction_task_pending_total->set_value(
+                    _base_compaction_thread_pool->get_queue_size());
+        }
         if (!st.ok()) {
             if (!force) {
                 _permit_limiter.release(permits);
@@ -1461,6 +1600,7 @@ void StorageEngine::_cold_data_compaction_producer_callback() {
                                          << t->tablet_id();
                             return;
                         }
+                        _update_cumulative_compaction_policy();
                         if (t->get_cumulative_compaction_policy() == nullptr ||
                             t->get_cumulative_compaction_policy()->name() !=
                                     t->tablet_meta()->compaction_policy()) {
@@ -1593,8 +1733,9 @@ void StorageEngine::_process_async_publish() {
                 continue;
             }
             if (version != max_version + 1) {
+                int32_t max_version_config = tablet->max_version_config();
                 // Keep only the most recent versions
-                while (tablet_iter->second.size() > config::max_tablet_version_num) {
+                while (tablet_iter->second.size() > max_version_config) {
                     need_removed_tasks.emplace_back(tablet, version);
                     task_iter = tablet_iter->second.erase(task_iter);
                     version = task_iter->first;

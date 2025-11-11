@@ -87,14 +87,22 @@ Status WalTable::_relay_wal_one_by_one() {
     std::vector<std::shared_ptr<WalInfo>> need_retry_wals;
     for (auto wal_info : _replaying_queue) {
         wal_info->add_retry_num();
-        auto st = _replay_wal_internal(wal_info->get_wal_path());
+        Status st;
+        int64_t file_size = 0;
+        std::filesystem::path file_path(wal_info->get_wal_path());
+        if (!std::filesystem::exists(file_path)) {
+            st = Status::InternalError("wal file {} does not exist", wal_info->get_wal_path());
+        } else {
+            file_size = std::filesystem::file_size(file_path);
+            st = _replay_wal_internal(wal_info->get_wal_path());
+        }
         auto msg = st.msg();
         if (st.ok() || st.is<ErrorCode::PUBLISH_TIMEOUT>() || st.is<ErrorCode::NOT_FOUND>() ||
             st.is<ErrorCode::DATA_QUALITY_ERROR>() ||
             (msg.find("has already been used") != msg.npos &&
              (msg.find("COMMITTED") != msg.npos || msg.find("VISIBLE") != msg.npos))) {
             LOG(INFO) << "succeed to replay wal=" << wal_info->get_wal_path()
-                      << ", st=" << st.to_string();
+                      << ", st=" << st.to_string() << ", file size=" << file_size;
             // delete wal
             WARN_IF_ERROR(_exec_env->wal_mgr()->delete_wal(_table_id, wal_info->get_wal_id()),
                           "failed to delete wal=" + wal_info->get_wal_path());
@@ -235,6 +243,8 @@ Status WalTable::_handle_stream_load(int64_t wal_id, const std::string& wal,
     RETURN_IF_ERROR(_construct_sql_str(wal, label, sql_str));
     std::shared_ptr<StreamLoadContext> ctx = std::make_shared<StreamLoadContext>(_exec_env);
     ctx->sql_str = sql_str;
+    ctx->db_id = _db_id;
+    ctx->table_id = _table_id;
     ctx->wal_id = wal_id;
     ctx->label = label;
     ctx->need_commit_self = false;
@@ -243,7 +253,10 @@ Status WalTable::_handle_stream_load(int64_t wal_id, const std::string& wal,
     ctx->group_commit = false;
     ctx->load_type = TLoadType::MANUL_LOAD;
     ctx->load_src_type = TLoadSourceType::RAW;
+    ctx->max_filter_ratio = 1;
     auto st = _http_stream_action->process_put(nullptr, ctx);
+    DBUG_EXECUTE_IF("WalTable::_handle_stream_load.fail",
+                    { st = Status::InternalError("WalTable::_handle_stream_load.fail"); });
     if (st.ok()) {
         // wait stream load finish
         RETURN_IF_ERROR(ctx->future.get());

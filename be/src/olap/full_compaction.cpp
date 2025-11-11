@@ -27,6 +27,7 @@
 
 #include "common/config.h"
 #include "common/status.h"
+#include "olap/base_tablet.h"
 #include "olap/compaction.h"
 #include "olap/cumulative_compaction_policy.h"
 #include "olap/olap_common.h"
@@ -52,8 +53,16 @@ FullCompaction::~FullCompaction() {
 }
 
 Status FullCompaction::prepare_compact() {
+    Status st;
+    Defer defer_set_st([&] {
+        if (!st.ok()) {
+            tablet()->set_last_full_compaction_status(st.to_string());
+            tablet()->set_last_full_compaction_failure_time(UnixMillis());
+        }
+    });
     if (!tablet()->init_succeeded()) {
-        return Status::Error<INVALID_ARGUMENT, false>("Full compaction init failed");
+        st = Status::Error<INVALID_ARGUMENT, false>("Full compaction init failed");
+        return st;
     }
 
     std::unique_lock base_lock(tablet()->get_base_compaction_lock());
@@ -64,18 +73,30 @@ Status FullCompaction::prepare_compact() {
                     { tablet()->set_cumulative_layer_point(tablet()->max_version_unlocked() + 1); })
 
     // 1. pick rowsets to compact
-    RETURN_IF_ERROR(pick_rowsets_to_compact());
+    st = pick_rowsets_to_compact();
+    RETURN_IF_ERROR(st);
 
-    return Status::OK();
+    st = Status::OK();
+    return st;
 }
 
 Status FullCompaction::execute_compact() {
+    Status st;
+    Defer defer_set_st([&] {
+        tablet()->set_last_full_compaction_status(st.to_string());
+        if (!st.ok()) {
+            tablet()->set_last_full_compaction_failure_time(UnixMillis());
+        } else {
+            tablet()->set_last_full_compaction_success_time(UnixMillis());
+        }
+    });
     std::unique_lock base_lock(tablet()->get_base_compaction_lock());
     std::unique_lock cumu_lock(tablet()->get_cumulative_compaction_lock());
 
     SCOPED_ATTACH_TASK(_mem_tracker);
 
-    RETURN_IF_ERROR(CompactionMixin::execute_compact());
+    st = CompactionMixin::execute_compact();
+    RETURN_IF_ERROR(st);
 
     tablet()->cumulative_compaction_policy()->update_compaction_level(tablet(), _input_rowsets,
                                                                       _output_rowset);
@@ -86,9 +107,8 @@ Status FullCompaction::execute_compact() {
     VLOG_CRITICAL << "after cumulative compaction, current cumulative point is "
                   << tablet()->cumulative_layer_point() << ", tablet=" << _tablet->tablet_id();
 
-    tablet()->set_last_full_compaction_success_time(UnixMillis());
-
-    return Status::OK();
+    st = Status::OK();
+    return st;
 }
 
 Status FullCompaction::pick_rowsets_to_compact() {
@@ -124,8 +144,9 @@ Status FullCompaction::modify_rowsets() {
         int64_t max_version = tablet()->max_version().second;
         DCHECK(max_version >= _output_rowset->version().second);
         if (max_version > _output_rowset->version().second) {
-            RETURN_IF_ERROR(_tablet->capture_consistent_rowsets_unlocked(
-                    {_output_rowset->version().second + 1, max_version}, &tmp_rowsets));
+            auto ret = DORIS_TRY(_tablet->capture_consistent_rowsets_unlocked(
+                    {_output_rowset->version().second + 1, max_version}, CaptureRowsetOps {}));
+            tmp_rowsets = std::move(ret.rowsets);
         }
 
         for (const auto& it : tmp_rowsets) {
@@ -200,7 +221,7 @@ Status FullCompaction::_full_compaction_calc_delete_bitmap(const RowsetSharedPtr
             [](size_t sum, const segment_v2::SegmentSharedPtr& s) { return sum += s->num_rows(); });
     for (const auto& [k, v] : delete_bitmap->delete_bitmap) {
         if (std::get<1>(k) != DeleteBitmap::INVALID_SEGMENT_ID) {
-            _tablet->tablet_meta()->delete_bitmap().merge(
+            _tablet->tablet_meta()->delete_bitmap()->merge(
                     {std::get<0>(k), std::get<1>(k), cur_version}, v);
         }
     }

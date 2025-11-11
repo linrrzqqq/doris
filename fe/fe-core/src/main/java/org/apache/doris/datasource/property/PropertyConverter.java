@@ -36,6 +36,7 @@ import org.apache.doris.datasource.property.constants.PaimonProperties;
 import org.apache.doris.datasource.property.constants.S3Properties;
 
 import com.aliyun.datalake.metastore.common.DataLakeConfig;
+import com.amazonaws.auth.InstanceProfileCredentialsProvider;
 import com.amazonaws.glue.catalog.util.AWSGlueConfig;
 import com.google.common.base.Strings;
 import com.google.common.collect.Maps;
@@ -45,9 +46,11 @@ import org.apache.hadoop.fs.LocalFileSystem;
 import org.apache.hadoop.fs.aliyun.oss.AliyunOSSFileSystem;
 import org.apache.hadoop.fs.obs.OBSConstants;
 import org.apache.hadoop.fs.obs.OBSFileSystem;
+import org.apache.hadoop.fs.s3a.AnonymousAWSCredentialsProvider;
 import org.apache.hadoop.fs.s3a.Constants;
 import org.apache.hadoop.fs.s3a.S3AFileSystem;
 import org.apache.hadoop.fs.s3a.TemporaryAWSCredentialsProvider;
+import org.apache.hadoop.fs.s3a.auth.AssumedRoleCredentialProvider;
 import org.apache.hadoop.hive.conf.HiveConf;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -225,6 +228,15 @@ public class PropertyConverter {
         if (properties.containsKey(S3Properties.Env.CONNECTION_TIMEOUT_MS)) {
             properties.put(S3Properties.REQUEST_TIMEOUT_MS, properties.get(S3Properties.Env.CONNECTION_TIMEOUT_MS));
         }
+
+        if (properties.containsKey(S3Properties.Env.ROLE_ARN)) {
+            properties.put(S3Properties.ROLE_ARN, properties.get(S3Properties.Env.ROLE_ARN));
+        }
+
+        if (properties.containsKey(S3Properties.Env.EXTERNAL_ID)) {
+            properties.put(S3Properties.EXTERNAL_ID, properties.get(S3Properties.Env.EXTERNAL_ID));
+        }
+
         if (isMeta) {
             return properties;
         }
@@ -252,10 +264,12 @@ public class PropertyConverter {
         if (properties.containsKey(S3Properties.CONNECTION_TIMEOUT_MS)) {
             s3Properties.put(Constants.SOCKET_TIMEOUT, properties.get(S3Properties.CONNECTION_TIMEOUT_MS));
         }
+
         setS3FsAccess(s3Properties, properties, credential);
         s3Properties.putAll(properties);
         // remove extra meta properties
         S3Properties.FS_KEYS.forEach(s3Properties::remove);
+
         return s3Properties;
     }
 
@@ -291,6 +305,28 @@ public class PropertyConverter {
                 s3Properties.put(entry.getKey(), entry.getValue());
             }
         }
+
+        if (properties.containsKey(S3Properties.ROLE_ARN)
+                && !Strings.isNullOrEmpty(properties.get(S3Properties.ROLE_ARN))) {
+            // refer to https://hadoop.apache.org/docs/stable/hadoop-aws/tools/hadoop-aws/assumed_roles.html
+            //          https://issues.apache.org/jira/browse/HADOOP-19201
+            s3Properties.put(Constants.AWS_CREDENTIALS_PROVIDER, AssumedRoleCredentialProvider.class.getName());
+            s3Properties.put(Constants.ASSUMED_ROLE_ARN, properties.get(S3Properties.ROLE_ARN));
+            s3Properties.put(Constants.ASSUMED_ROLE_CREDENTIALS_PROVIDER,
+                    InstanceProfileCredentialsProvider.class.getName());
+
+            if (properties.containsKey(S3Properties.EXTERNAL_ID)
+                    && !Strings.isNullOrEmpty(properties.get(S3Properties.EXTERNAL_ID))) {
+                LOG.warn("External ID is not supported for assumed role credential provider");
+            }
+        } else if (Strings.isNullOrEmpty(credential.getAccessKey())
+                && Strings.isNullOrEmpty(credential.getSecretKey())) {
+            // if no access key and secret key, use anonymous credentials
+            s3Properties.put(Constants.AWS_CREDENTIALS_PROVIDER, AnonymousAWSCredentialsProvider.class.getName());
+            // anonymous credentials should set max paging keys to avoid exceeding the default limit
+            // of 1000, which may cause issues with some S3-compatible services.
+            s3Properties.putIfAbsent(Constants.MAX_PAGING_KEYS, "1000");
+        }
     }
 
     public static String getAWSCredentialsProviders(Map<String, String> properties) {
@@ -318,11 +354,12 @@ public class PropertyConverter {
             endpoint = endpoint.replace(OssProperties.OSS_PREFIX, "");
         }
         ossProperties.put(org.apache.hadoop.fs.aliyun.oss.Constants.ENDPOINT_KEY, endpoint);
-        ossProperties.put("fs.oss.impl", getHadoopFSImplByScheme("oss"));
         boolean hdfsEnabled = Boolean.parseBoolean(props.getOrDefault(OssProperties.OSS_HDFS_ENABLED, "false"));
         if (LocationPath.isHdfsOnOssEndpoint(endpoint) || hdfsEnabled) {
             // use endpoint or enable hdfs
             rewriteHdfsOnOssProperties(ossProperties, endpoint);
+        } else {
+            ossProperties.put("fs.oss.impl", getHadoopFSImplByScheme("oss"));
         }
         if (credential.isWhole()) {
             ossProperties.put(org.apache.hadoop.fs.aliyun.oss.Constants.ACCESS_KEY_ID, credential.getAccessKey());

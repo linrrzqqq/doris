@@ -24,6 +24,7 @@ suite("test_prepared_stmt", "nonConcurrent") {
     def password = context.config.jdbcPassword
     // def url = context.config.jdbcUrl + "&useServerPrepStmts=true&useCursorFetch=true"
     String url = getServerPrepareJdbcUrl(context.config.jdbcUrl, "regression_test_prepared_stmt_p0")
+    logger.info("jdbc prepare statement url: ${url}")
     def result1 = connect(user, password, url) {
         sql """DROP TABLE IF EXISTS ${tableName} """
         sql """
@@ -60,8 +61,19 @@ suite("test_prepared_stmt", "nonConcurrent") {
         qt_sql """select * from  ${tableName} order by 1, 2, 3"""
         sql "set global max_prepared_stmt_count = 10000"
         sql "set enable_fallback_to_original_planner = false"
+        sql """set global enable_server_side_prepared_statement = true"""
 
-        def stmt_read = prepareStatement "select * from ${tableName} where k1 = ? order by k1"
+        int count = 65536;
+        StringBuilder sb = new StringBuilder();
+        sb.append("?");
+        for (int i = 1; i < count; i++) {
+            sb.append(", ?");
+        }
+        String sqlWithTooManyPlaceholder = sb.toString();
+        def stmt_read = prepareStatement "select * from ${tableName} where k1 in ${sqlWithTooManyPlaceholder}"
+        assertEquals(com.mysql.cj.jdbc.ClientPreparedStatement, stmt_read.class)
+
+        stmt_read = prepareStatement "select * from ${tableName} where k1 = ? order by k1"
         assertEquals(com.mysql.cj.jdbc.ServerPreparedStatement, stmt_read.class)
         stmt_read.setInt(1, 1231)
         qe_select0 stmt_read
@@ -301,6 +313,12 @@ suite("test_prepared_stmt", "nonConcurrent") {
         stmt_read = prepareStatement("""SELECT 1, null, [{'id': 1, 'name' : 'doris'}, {'id': 2, 'name': 'apache'}, null], null""")
         assertEquals(com.mysql.cj.jdbc.ServerPreparedStatement, stmt_read.class)
         qe_select24 stmt_read
+
+        // test date_trunc
+        stmt_read = prepareStatement "select date_trunc (? , ?)"
+        stmt_read.setString(1, "2025-08-15 11:22:33")
+        stmt_read.setString(2, "DAY")
+        qe_select25 stmt_read
     }
 
     // test stmtId overflow

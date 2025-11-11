@@ -183,6 +183,8 @@ void ParquetReader::_init_profile() {
                 _profile, "ParsePageHeaderNum", TUnit::UNIT, parquet_profile, 1);
         _parquet_profile.predicate_filter_time =
                 ADD_CHILD_TIMER_WITH_LEVEL(_profile, "PredicateFilterTime", parquet_profile, 1);
+        _parquet_profile.dict_filter_rewrite_time =
+                ADD_CHILD_TIMER_WITH_LEVEL(_profile, "DictFilterRewriteTime", parquet_profile, 1);
     }
 }
 
@@ -295,7 +297,7 @@ void ParquetReader::iceberg_sanitize(const std::vector<std::string>& read_column
 Status ParquetReader::init_reader(
         const std::vector<std::string>& all_column_names,
         const std::vector<std::string>& missing_column_names,
-        std::unordered_map<std::string, ColumnValueRangeType>* colname_to_value_range,
+        const std::unordered_map<std::string, ColumnValueRangeType>* colname_to_value_range,
         const VExprContextSPtrs& conjuncts, const TupleDescriptor* tuple_descriptor,
         const RowDescriptor* row_descriptor,
         const std::unordered_map<std::string, int>* colname_to_slot_id,
@@ -346,7 +348,6 @@ Status ParquetReader::init_reader(
             _missing_cols.emplace_back(name);
         }
     } else {
-        std::unordered_map<std::string, ColumnValueRangeType> new_colname_to_value_range;
         const auto& table_column_idxs = _scan_params.column_idxs;
         std::map<int, int> table_col_id_to_idx;
         for (int i = 0; i < table_column_idxs.size(); i++) {
@@ -360,21 +361,15 @@ Status ParquetReader::init_reader(
                 auto& table_col = all_column_names[idx];
                 auto file_col = schema_desc.get_column(id)->name;
                 _read_columns.emplace_back(file_col);
+                _table_col_to_file_col[table_col] = file_col;
 
-                if (table_col != file_col) {
-                    _table_col_to_file_col[table_col] = file_col;
-                    auto iter = _colname_to_value_range->find(table_col);
-                    if (iter != _colname_to_value_range->end()) {
-                        continue;
-                    }
-                    new_colname_to_value_range[file_col] = iter->second;
-                    _colname_to_value_range->erase(iter->first);
+                auto iter = _colname_to_value_range->find(table_col);
+                if (iter != _colname_to_value_range->end()) {
+                    _colname_to_value_range_index_read.emplace(file_col, iter->second);
                 }
             }
         }
-        for (auto it : new_colname_to_value_range) {
-            _colname_to_value_range->emplace(it.first, std::move(it.second));
-        }
+        _colname_to_value_range = &_colname_to_value_range_index_read;
     }
     // build column predicates for column lazy read
     _lazy_read_ctx.conjuncts = conjuncts;
@@ -558,6 +553,7 @@ Status ParquetReader::get_next_block(Block* block, size_t* read_rows, bool* eof)
         return Status::OK();
     }
 
+    std::vector<std::string> original_block_column_name = block->get_names();
     if (!_hive_use_column_names) {
         for (auto i = 0; i < block->get_names().size(); i++) {
             auto& col = block->get_by_position(i);
@@ -581,7 +577,7 @@ Status ParquetReader::get_next_block(Block* block, size_t* read_rows, bool* eof)
 
     if (!_hive_use_column_names) {
         for (auto i = 0; i < block->columns(); i++) {
-            block->get_by_position(i).name = (*_column_names)[i];
+            block->get_by_position(i).name = original_block_column_name[i];
         }
         block->initialize_index_by_name();
     }
@@ -595,6 +591,7 @@ Status ParquetReader::get_next_block(Block* block, size_t* read_rows, bool* eof)
         _column_statistics.merge(column_st);
         _statistics.lazy_read_filtered_rows += _current_group_reader->lazy_read_filtered_rows();
         _statistics.predicate_filter_time += _current_group_reader->predicate_filter_time();
+        _statistics.dict_filter_rewrite_time += _current_group_reader->dict_filter_rewrite_time();
         if (_read_row_groups.size() == 0) {
             *eof = true;
         } else {
@@ -865,7 +862,7 @@ Status ParquetReader::_process_page_index(const tparquet::RowGroup& row_group,
             // use the union row range
             skipped_row_ranges.emplace_back(skipped_row_range);
         }
-        _col_offsets.emplace(parquet_col_id, offset_index);
+        _col_offsets[parquet_col_id] = offset_index;
     }
     if (skipped_row_ranges.empty()) {
         read_whole_row_group();
@@ -1039,6 +1036,7 @@ void ParquetReader::_collect_profile() {
     COUNTER_UPDATE(_parquet_profile.parse_page_header_num,
                    _column_statistics.parse_page_header_num);
     COUNTER_UPDATE(_parquet_profile.predicate_filter_time, _statistics.predicate_filter_time);
+    COUNTER_UPDATE(_parquet_profile.dict_filter_rewrite_time, _statistics.dict_filter_rewrite_time);
     COUNTER_UPDATE(_parquet_profile.file_read_time, _column_statistics.read_time);
     COUNTER_UPDATE(_parquet_profile.file_read_calls, _column_statistics.read_calls);
     COUNTER_UPDATE(_parquet_profile.file_meta_read_calls, _column_statistics.meta_read_calls);

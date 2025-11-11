@@ -175,7 +175,7 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
     private List<TupleDescriptor> intermediateOutputTupleDescList = Lists.newArrayList();
     private List<List<Expr>> intermediateProjectListList = Lists.newArrayList();
 
-    protected PlanNode(PlanNodeId id, ArrayList<TupleId> tupleIds, String planNodeName,
+    protected PlanNode(PlanNodeId id, List<TupleId> tupleIds, String planNodeName,
             StatisticalType statisticalType) {
         this.id = id;
         this.limit = -1;
@@ -279,10 +279,6 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
 
     public void setFragment(PlanFragment fragment) {
         this.fragment = fragment;
-    }
-
-    public boolean isNullAwareLeftAntiJoin() {
-        return children.stream().anyMatch(PlanNode::isNullAwareLeftAntiJoin);
     }
 
     public PlanFragment getFragment() {

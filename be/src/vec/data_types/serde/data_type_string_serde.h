@@ -63,6 +63,31 @@ inline void escape_string(const char* src, size_t& len, char escape_char) {
     len = dest_ptr - start;
 }
 
+// specially escape quote with double quote
+inline void escape_string_for_csv(const char* src, size_t& len, char escape_char, char quote_char) {
+    const char* start = src;
+    char* dest_ptr = const_cast<char*>(src);
+    const char* end = src + len;
+    bool escape_next_char = false;
+
+    while (src < end) {
+        if ((src < end - 1 && *src == quote_char && *(src + 1) == quote_char) ||
+            *src == escape_char) {
+            escape_next_char = !escape_next_char;
+        } else {
+            escape_next_char = false;
+        }
+
+        if (escape_next_char) {
+            ++src;
+        } else {
+            *dest_ptr++ = *src++;
+        }
+    }
+
+    len = dest_ptr - start;
+}
+
 template <typename ColumnType>
 class DataTypeStringSerDeBase : public DataTypeSerDe {
 public:
@@ -166,21 +191,30 @@ public:
     Status deserialize_one_cell_from_json(IColumn& column, Slice& slice,
                                           const FormatOptions& options) const override {
         /*
-     * For strings in the json complex type, we remove double quotes by default.
-     *
-     * Because when querying complex types, such as selecting complexColumn from table,
-     * we will add double quotes to the strings in the complex type.
-     *
-     * For the map<string,int> column, insert { "abc" : 1, "hello",2 }.
-     * If you do not remove the double quotes, it will display {""abc"":1,""hello"": 2 },
-     * remove the double quotes to display { "abc" : 1, "hello",2 }.
-     *
-     */
+         * For strings in the json complex type, we remove double quotes by default.
+         *
+         * Because when querying complex types, such as selecting complexColumn from table,
+         * we will add double quotes to the strings in the complex type.
+         *
+         * For the map<string,int> column, insert { "abc" : 1, "hello",2 }.
+         * If you do not remove the double quotes, it will display {""abc"":1,""hello"": 2 },
+         * remove the double quotes to display { "abc" : 1, "hello",2 }.
+         *
+         */
         if (_nesting_level >= 2) {
             slice.trim_quote();
         }
         if (options.escape_char != 0) {
             escape_string(slice.data, slice.size, options.escape_char);
+        }
+        assert_cast<ColumnType&>(column).insert_data(slice.data, slice.size);
+        return Status::OK();
+    }
+
+    Status deserialize_one_cell_from_csv(IColumn& column, Slice& slice,
+                                         const FormatOptions& options) const override {
+        if (options.escape_char != 0) {
+            escape_string_for_csv(slice.data, slice.size, options.escape_char, options.quote_char);
         }
         assert_cast<ColumnType&>(column).insert_data(slice.data, slice.size);
         return Status::OK();

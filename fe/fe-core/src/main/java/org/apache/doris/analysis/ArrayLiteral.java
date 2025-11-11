@@ -18,6 +18,8 @@
 package org.apache.doris.analysis;
 
 import org.apache.doris.catalog.ArrayType;
+import org.apache.doris.catalog.TableIf;
+import org.apache.doris.catalog.TableIf.TableType;
 import org.apache.doris.catalog.Type;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.FormatOptions;
@@ -118,6 +120,15 @@ public class ArrayLiteral extends LiteralExpr {
     }
 
     @Override
+    protected String toSqlImpl(boolean disableTableName, boolean needExternalSql, TableType tableType,
+            TableIf table) {
+        List<String> list = new ArrayList<>(children.size());
+        children.forEach(v -> list.add(v.toSqlImpl(disableTableName, needExternalSql, tableType, table)));
+
+        return "[" + StringUtils.join(list, ", ") + "]";
+    }
+
+    @Override
     public String toDigestImpl() {
         List<String> list = new ArrayList<>(children.size());
         children.forEach(v -> list.add(v.toDigestImpl()));
@@ -133,42 +144,14 @@ public class ArrayLiteral extends LiteralExpr {
     }
 
     @Override
-    public String getStringValueForArray(FormatOptions options) {
+    public String getStringValueForQuery(FormatOptions options) {
         List<String> list = new ArrayList<>(children.size());
-        children.forEach(v -> list.add(v.getStringValueForArray(options)));
-        return "[" + StringUtils.join(list, ", ") + "]";
-    }
-
-    @Override
-    public String getStringValueInFe(FormatOptions options) {
-        List<String> list = new ArrayList<>(children.size());
+        ++options.level;
         children.forEach(v -> {
-            String stringLiteral;
-            if (v instanceof NullLiteral) {
-                stringLiteral = options.getNullFormat();
-            } else {
-                stringLiteral = getStringLiteralForComplexType(v, options);
-            }
-            // we should use type to decide we output array is suitable for json format
-            list.add(stringLiteral);
+            list.add(v.getStringValueInComplexTypeForQuery(options));
         });
-        return "[" + StringUtils.join(list, ", ") + "]";
-    }
-
-    @Override
-    public String getStringValueForStreamLoad(FormatOptions options) {
-        List<String> list = new ArrayList<>(children.size());
-        children.forEach(v -> {
-            String stringLiteral;
-            if (v instanceof NullLiteral) {
-                stringLiteral = "null";
-            } else {
-                stringLiteral = getStringLiteralForStreamLoad(v, options);
-            }
-            // we should use type to decide we output array is suitable for json format
-            list.add(stringLiteral);
-        });
-        return "[" + StringUtils.join(list, ", ") + "]";
+        --options.level;
+        return "[" + StringUtils.join(list, options.getCollectionDelim()) + "]";
     }
 
     @Override

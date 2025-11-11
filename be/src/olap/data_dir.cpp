@@ -635,14 +635,14 @@ Status DataDir::load() {
             }
             ++dbm_cnt;
             auto seg_id = delete_bitmap_pb.segment_ids(i);
-            auto iter = tablet->tablet_meta()->delete_bitmap().delete_bitmap.find(
+            auto iter = tablet->tablet_meta()->delete_bitmap()->delete_bitmap.find(
                     {rst_id, seg_id, version});
             // This version of delete bitmap already exists
-            if (iter != tablet->tablet_meta()->delete_bitmap().delete_bitmap.end()) {
+            if (iter != tablet->tablet_meta()->delete_bitmap()->delete_bitmap.end()) {
                 continue;
             }
             auto bitmap = delete_bitmap_pb.segment_delete_bitmaps(i).data();
-            tablet->tablet_meta()->delete_bitmap().delete_bitmap[{rst_id, seg_id, version}] =
+            tablet->tablet_meta()->delete_bitmap()->delete_bitmap[{rst_id, seg_id, version}] =
                     roaring::Roaring::read(bitmap);
         }
         return true;
@@ -753,6 +753,14 @@ void DataDir::_perform_rowset_gc(const std::string& tablet_schema_hash_path) {
     tablet->traverse_rowsets(
             [&rowsets_in_version_map](auto& rs) { rowsets_in_version_map.insert(rs->rowset_id()); },
             true);
+
+    DBUG_EXECUTE_IF("DataDir::_perform_rowset_gc.simulation.slow", {
+        auto target_tablet_id = dp->param<int64_t>("tablet_id", -1);
+        if (target_tablet_id == tablet_id) {
+            LOG(INFO) << "debug point wait tablet to remove rsmgr tabletId=" << tablet_id;
+            DBUG_BLOCK;
+        }
+    });
 
     auto reclaim_rowset_file = [](const std::string& path) {
         auto st = io::global_local_filesystem()->delete_file(path);

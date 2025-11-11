@@ -52,7 +52,7 @@ import java.util.List;
  * Refreshing or invalidating a view will reload the view's definition but will not
  * affect the metadata of the underlying tables (if any).
  */
-public class View extends Table implements GsonPostProcessable {
+public class View extends Table implements GsonPostProcessable, ViewIf {
     private static final Logger LOG = LogManager.getLogger(View.class);
 
     // The original SQL-string given as view definition. Set during analysis.
@@ -216,6 +216,11 @@ public class View extends Table implements GsonPostProcessable {
         return colLabels != null;
     }
 
+    @Override
+    public String getViewText() {
+        return inlineViewDef;
+    }
+
     // Get the md5 of signature string of this view.
     // This method is used to determine whether the views have the same schema.
     // Contains:
@@ -269,7 +274,8 @@ public class View extends Table implements GsonPostProcessable {
     public void resetViewDefForRestore(String srcDbName, String dbName) {
         // the source db name is not setted in old BackupMeta, keep compatible with the old one.
         if (srcDbName != null) {
-            inlineViewDef = inlineViewDef.replaceAll(srcDbName, dbName);
+            // replace dbName with a regular expression
+            inlineViewDef = inlineViewDef.replaceAll("(?<=`internal`\\.`)([^`]+)(?=`\\.`)", dbName);
         }
     }
 

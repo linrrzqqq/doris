@@ -19,6 +19,8 @@ package org.apache.doris.analysis;
 
 import org.apache.doris.catalog.MysqlColType;
 import org.apache.doris.catalog.PrimitiveType;
+import org.apache.doris.catalog.TableIf;
+import org.apache.doris.catalog.TableIf.TableType;
 import org.apache.doris.catalog.Type;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.FormatOptions;
@@ -183,6 +185,15 @@ public class PlaceHolderExpr extends LiteralExpr {
         return "_placeholder_(" + this.lExpr.toSqlImpl() + ")";
     }
 
+    @Override
+    public String toSqlImpl(boolean disableTableName, boolean needExternalSql, TableType tableType,
+            TableIf table) {
+        if (this.lExpr == null) {
+            return "?";
+        }
+        return "_placeholder_(" + this.lExpr.toSqlImpl(disableTableName, needExternalSql, tableType, table) + ")";
+    }
+
     // @Override
     public Expr reset() {
         this.lExpr = null;
@@ -191,8 +202,8 @@ public class PlaceHolderExpr extends LiteralExpr {
     }
 
     @Override
-    public String getStringValueForArray(FormatOptions options) {
-        return options.getNestedStringWrapper() + getStringValue() + options.getNestedStringWrapper();
+    protected String getStringValueInComplexTypeForQuery(FormatOptions options) {
+        return options.getNestedStringWrapper() + getStringValueForQuery(options) + options.getNestedStringWrapper();
     }
 
     public void setupParamFromBinary(ByteBuffer data, boolean isUnsigned) {

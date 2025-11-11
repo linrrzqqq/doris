@@ -18,6 +18,8 @@
 package org.apache.doris.analysis;
 
 import org.apache.doris.catalog.MapType;
+import org.apache.doris.catalog.TableIf;
+import org.apache.doris.catalog.TableIf.TableType;
 import org.apache.doris.catalog.Type;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.FormatOptions;
@@ -171,29 +173,20 @@ public class MapLiteral extends LiteralExpr {
     }
 
     @Override
-    public String getStringValueForArray(FormatOptions options) {
+    public String getStringValueForQuery(FormatOptions options) {
         List<String> list = new ArrayList<>(children.size());
-        for (int i = 0; i < children.size() && i + 1 < children.size(); i += 2) {
-            list.add(children.get(i).getStringValueForArray(options)
-                    + options.getMapKeyDelim()
-                    + children.get(i + 1).getStringValueForArray(options));
-        }
-        return "{" + StringUtils.join(list, ", ") + "}";
-    }
-
-    @Override
-    public String getStringValueInFe(FormatOptions options) {
-        List<String> list = new ArrayList<>(children.size());
+        ++options.level;
         for (int i = 0; i < children.size() && i + 1 < children.size(); i += 2) {
             // we should use type to decide we output array is suitable for json format
             if (children.get(i).getType().isComplexType()) {
                 // map key type do not support complex type
                 throw new UnsupportedOperationException("Unsupported key type for MAP: " + children.get(i).getType());
             }
-            list.add(getStringLiteralForComplexType(children.get(i), options)
-                    + options.getMapKeyDelim() + getStringLiteralForComplexType(children.get(i + 1), options));
+            list.add(children.get(i).getStringValueInComplexTypeForQuery(options)
+                    + options.getMapKeyDelim() + children.get(i + 1).getStringValueInComplexTypeForQuery(options));
         }
-        return "{" + StringUtils.join(list, ", ") + "}";
+        --options.level;
+        return "{" + StringUtils.join(list, options.getCollectionDelim()) + "}";
     }
 
     @Override
@@ -201,6 +194,18 @@ public class MapLiteral extends LiteralExpr {
         List<String> list = new ArrayList<>(children.size());
         for (int i = 0; i < children.size() && i + 1 < children.size(); i += 2) {
             list.add(children.get(i).toSqlImpl() + ":" + children.get(i + 1).toSqlImpl());
+        }
+        return "MAP{" + StringUtils.join(list, ", ") + "}";
+    }
+
+    @Override
+    protected String toSqlImpl(boolean disableTableName, boolean needExternalSql, TableType tableType,
+            TableIf table) {
+        List<String> list = new ArrayList<>(children.size());
+        for (int i = 0; i < children.size() && i + 1 < children.size(); i += 2) {
+            list.add(
+                    children.get(i).toSqlImpl(disableTableName, needExternalSql, tableType, table) + ":" + children.get(
+                            i + 1).toSqlImpl(disableTableName, needExternalSql, tableType, table));
         }
         return "MAP{" + StringUtils.join(list, ", ") + "}";
     }

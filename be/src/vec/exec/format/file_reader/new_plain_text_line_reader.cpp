@@ -21,6 +21,8 @@
 #include <glog/logging.h>
 #include <string.h>
 
+#include "common/logging.h"
+
 #ifdef __AVX2__
 #include <immintrin.h>
 #endif
@@ -47,6 +49,12 @@
 namespace doris {
 const uint8_t* EncloseCsvLineReaderContext::read_line_impl(const uint8_t* start,
                                                            const size_t length) {
+    // Avoid part bytes of the multi-char column separator have already been parsed,
+    // causing parse column separator error.
+    if (_state.curr_state == ReaderState::NORMAL ||
+        _state.curr_state == ReaderState::MATCH_ENCLOSE) {
+        _idx -= std::min(_column_sep_len - 1, _idx);
+    }
     _total_len = length;
     size_t bound = update_reading_bound(start);
 
@@ -139,7 +147,6 @@ void EncloseCsvLineReaderContext::_on_normal(const uint8_t* start, size_t& len) 
         _state.forward_to(ReaderState::START);
         return;
     }
-    // TODO(tsy): maybe potential bug when a multi-char is not read completely
     _idx = len;
 }
 
@@ -150,11 +157,22 @@ void EncloseCsvLineReaderContext::_on_pre_match_enclose(const uint8_t* start, si
                 _should_escape = !_should_escape;
             } else if (_should_escape) [[unlikely]] {
                 _should_escape = false;
-            } else if (start[_idx] == _enclose) [[unlikely]] {
-                _state.forward_to(ReaderState::MATCH_ENCLOSE);
-                ++_idx;
-                return;
+            } else if (_quote_escape) {
+                if (start[_idx] == _enclose) {
+                    // double quote, escaped by quote
+                    _quote_escape = false;
+                } else {
+                    // match enclose
+                    _quote_escape = false;
+                    _state.forward_to(ReaderState::MATCH_ENCLOSE);
+                    return;
+                }
+            } else if (start[_idx] == _enclose) {
+                _quote_escape = true;
+            } else {
+                _quote_escape = false;
             }
+
             ++_idx;
         } while (_idx != len);
 
@@ -426,12 +444,12 @@ Status NewPlainTextLineReader::read_line(const uint8_t** ptr, size_t* size, bool
                         _output_buf_size - _output_buf_limit,               /* output_max_len */
                         &decompressed_len, &stream_end, &_more_input_bytes, &_more_output_bytes));
 
-                // LOG(INFO) << "after decompress:"
-                //           << " stream_end: " << stream_end
-                //           << " input_read_bytes: " << input_read_bytes
-                //           << " decompressed_len: " << decompressed_len
-                //           << " more_input_bytes: " << _more_input_bytes
-                //           << " more_output_bytes: " << _more_output_bytes;
+                VLOG_DEBUG << "after decompress:"
+                           << " stream_end: " << stream_end
+                           << " input_read_bytes: " << input_read_bytes
+                           << " decompressed_len: " << decompressed_len
+                           << " more_input_bytes: " << _more_input_bytes
+                           << " more_output_bytes: " << _more_output_bytes;
 
                 // update pos and limit
                 _input_buf_pos += input_read_bytes;

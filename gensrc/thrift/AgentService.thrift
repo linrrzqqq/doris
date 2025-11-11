@@ -48,7 +48,7 @@ struct TTabletSchema {
     // col unique id for row store column
     20: optional list<i32> row_store_col_cids
     21: optional i64 row_store_page_size = 16384
-    22: optional bool variant_enable_flatten_nested = false 
+    22: optional bool variant_enable_flatten_nested = false
     23: optional i64 storage_page_size = 65536
 }
 
@@ -74,7 +74,15 @@ enum TObjStorageType {
     COS = 4,
     OBS = 5,
     OSS = 6,
-    GCP = 7
+    GCP = 7,
+    TOS = 8
+}
+
+enum TCredProviderType {
+    // used for creating different credentials provider when creating s3client
+    DEFAULT = 0,  // DefaultAWSCredentialsProviderChain
+    SIMPLE = 1,  // SimpleAWSCredentialsProvider, corresponding to (ak, sk)
+    INSTANCE_PROFILE = 2  // InstanceProfileCredentialsProvider
 }
 
 struct TS3StorageParam {
@@ -90,6 +98,10 @@ struct TS3StorageParam {
     10: optional bool use_path_style = false
     11: optional string token
     12: optional TObjStorageType provider
+
+    13: optional TCredProviderType cred_provider_type
+    14: optional string role_arn  // aws assumed role's arn
+    15: optional string external_id  // aws assumed role's external_id if configure
 }
 
 struct TStoragePolicy {

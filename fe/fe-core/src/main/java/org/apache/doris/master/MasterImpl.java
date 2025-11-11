@@ -256,6 +256,7 @@ public class MasterImpl {
                 createReplicaTask.countDownToZero(task.getBackendId() + ": "
                         + request.getTaskStatus().getErrorMsgs().toString());
             } else {
+                createReplicaTask.setFinished(true);
                 long tabletId = createReplicaTask.getTabletId();
 
                 if (request.isSetFinishTabletInfos()) {
@@ -590,6 +591,7 @@ public class MasterImpl {
 
     private void finishMakeSnapshot(AgentTask task, TFinishTaskRequest request) {
         SnapshotTask snapshotTask = (SnapshotTask) task;
+        task.setFinished(true);
         if (snapshotTask.isCopyTabletTask()) {
             snapshotTask.setResultSnapshotPath(request.getSnapshotPath());
             snapshotTask.countDown(task.getBackendId(), task.getTabletId());
@@ -609,6 +611,7 @@ public class MasterImpl {
 
     private void finishDownloadTask(AgentTask task, TFinishTaskRequest request) {
         DownloadTask downloadTask = (DownloadTask) task;
+        task.setFinished(true);
         if (Env.getCurrentEnv().getBackupHandler().handleDownloadSnapshotTask(downloadTask, request)) {
             AgentTaskQueue.removeTask(task.getBackendId(), TTaskType.DOWNLOAD, task.getSignature());
         }
@@ -616,6 +619,7 @@ public class MasterImpl {
 
     private void finishMoveDirTask(AgentTask task, TFinishTaskRequest request) {
         DirMoveTask dirMoveTask = (DirMoveTask) task;
+        task.setFinished(true);
         if (Env.getCurrentEnv().getBackupHandler().handleDirMoveTask(dirMoveTask, request)) {
             AgentTaskQueue.removeTask(task.getBackendId(), TTaskType.MOVE, task.getSignature());
         }
@@ -679,12 +683,8 @@ public class MasterImpl {
         // and if meta is missing, we no longer need to resend this task
         try {
             CalcDeleteBitmapTask calcDeleteBitmapTask = (CalcDeleteBitmapTask) task;
-            if (request.getTaskStatus().getStatusCode() != TStatusCode.OK) {
-                calcDeleteBitmapTask.countDownToZero(request.getTaskStatus().getStatusCode(),
-                        "backend: " + task.getBackendId() + ", error_tablet_size: "
-                                + request.getErrorTabletIdsSize() + ", err_msg: "
-                                + request.getTaskStatus().getErrorMsgs().toString());
-            } else if (request.isSetRespPartitions()
+            // check if the request is stale first, if so, let it retry regardless of the status code
+            if (request.isSetRespPartitions()
                     && calcDeleteBitmapTask.isFinishRequestStale(request.getRespPartitions())) {
                 LOG.warn("get staled response from backend: {}, report version: {}. calcDeleteBitmapTask's"
                         + "partitionInfos: {}. response's partitionInfos: {}", task.getBackendId(),
@@ -695,6 +695,11 @@ public class MasterImpl {
                 calcDeleteBitmapTask.countDownToZero(TStatusCode.DELETE_BITMAP_LOCK_ERROR,
                         "get staled response from backend " + task.getBackendId() + ", report version: "
                                 + request.getReportVersion());
+            } else if (request.getTaskStatus().getStatusCode() != TStatusCode.OK) {
+                calcDeleteBitmapTask.countDownToZero(request.getTaskStatus().getStatusCode(),
+                        "backend: " + task.getBackendId() + ", error_tablet_size: " + request.getErrorTabletIdsSize()
+                                + ", error_tablets: " + request.getErrorTabletIds()
+                                + ", err_msg: " + request.getTaskStatus().getErrorMsgs().toString());
             } else {
                 calcDeleteBitmapTask.countDownLatch(task.getBackendId(), calcDeleteBitmapTask.getTransactionId());
                 if (LOG.isDebugEnabled()) {

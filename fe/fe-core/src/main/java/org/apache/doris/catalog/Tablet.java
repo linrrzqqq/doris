@@ -303,23 +303,27 @@ public class Tablet extends MetaObject {
                 (rep, be) -> ((CloudReplica) rep).getBackendId(be));
     }
 
+    // When a BE reports a missing version, lastFailedVersion is set. When a write fails on a replica,
+    // lastFailedVersion is set.
     // for query
     public List<Replica> getQueryableReplicas(long visibleVersion, Map<Long, Set<Long>> backendAlivePathHashs,
-            boolean allowFailedVersion) {
+            boolean allowMissingVersion) {
         List<Replica> allQueryableReplica = Lists.newArrayListWithCapacity(replicas.size());
         List<Replica> auxiliaryReplica = Lists.newArrayListWithCapacity(replicas.size());
         List<Replica> deadPathReplica = Lists.newArrayList();
+        List<Replica> mayMissingVersionReplica = Lists.newArrayList();
+        List<Replica> notCatchupReplica = Lists.newArrayList();
+
         for (Replica replica : replicas) {
             if (replica.isBad()) {
                 continue;
             }
-
-            // Skip the missing version replica
-            if (replica.getLastFailedVersion() > 0 && !allowFailedVersion) {
+            if (!replica.checkVersionCatchUp(visibleVersion, false)) {
+                notCatchupReplica.add(replica);
                 continue;
             }
-
-            if (!replica.checkVersionCatchUp(visibleVersion, false)) {
+            if (replica.getLastFailedVersion() > 0) {
+                mayMissingVersionReplica.add(replica);
                 continue;
             }
 
@@ -343,6 +347,15 @@ public class Tablet extends MetaObject {
         }
         if (allQueryableReplica.isEmpty()) {
             allQueryableReplica = deadPathReplica;
+        }
+
+        if (allQueryableReplica.isEmpty()) {
+            // If be misses a version, be would report failure.
+            allQueryableReplica = mayMissingVersionReplica;
+        }
+
+        if (allQueryableReplica.isEmpty() && allowMissingVersion) {
+            allQueryableReplica = notCatchupReplica;
         }
 
         if (Config.skip_compaction_slower_replica && allQueryableReplica.size() > 1) {
@@ -502,8 +515,11 @@ public class Tablet extends MetaObject {
         return id == tablet.id;
     }
 
-    public long getDataSize(boolean singleReplica) {
+    // ATTN: Replica::getDataSize may zero in cloud and non-cloud
+    // due to dataSize not write to image
+    public long getDataSize(boolean singleReplica, boolean filterSizeZero) {
         LongStream s = replicas.stream().filter(r -> r.getState() == ReplicaState.NORMAL)
+                .filter(r -> !filterSizeZero || r.getDataSize() > 0)
                 .mapToLong(Replica::getDataSize);
         return singleReplica ? Double.valueOf(s.average().orElse(0)).longValue() : s.sum();
     }

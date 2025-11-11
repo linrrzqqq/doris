@@ -47,7 +47,7 @@ public:
 
     NewJdbcScanner(RuntimeState* state, doris::pipeline::JDBCScanLocalState* parent, int64_t limit,
                    const TupleId& tuple_id, const std::string& query_string,
-                   TOdbcTableType::type table_type, RuntimeProfile* profile);
+                   TOdbcTableType::type table_type, bool is_tvf, RuntimeProfile* profile);
     Status open(RuntimeState* state) override;
     Status close(RuntimeState* state) override;
 
@@ -59,7 +59,11 @@ protected:
     RuntimeProfile::Counter* _load_jar_timer = nullptr;
     RuntimeProfile::Counter* _init_connector_timer = nullptr;
     RuntimeProfile::Counter* _get_data_timer = nullptr;
-    RuntimeProfile::Counter* _get_block_address_timer = nullptr;
+    RuntimeProfile::Counter* _jni_setup_timer = nullptr;
+    RuntimeProfile::Counter* _has_next_timer = nullptr;
+    RuntimeProfile::Counter* _prepare_params_timer = nullptr;
+    RuntimeProfile::Counter* _cast_timer = nullptr;
+    RuntimeProfile::Counter* _read_and_fill_vector_table_timer = nullptr;
     RuntimeProfile::Counter* _fill_block_timer = nullptr;
     RuntimeProfile::Counter* _check_type_timer = nullptr;
     RuntimeProfile::Counter* _execte_read_timer = nullptr;
@@ -79,6 +83,7 @@ private:
     const TupleDescriptor* _tuple_desc = nullptr;
     // the sql query database type: like mysql, PG...
     TOdbcTableType::type _table_type;
+    bool _is_tvf;
     // Scanner of JDBC.
     std::unique_ptr<JdbcConnector> _jdbc_connector;
     JdbcConnectorParam _jdbc_param;

@@ -166,6 +166,12 @@ Status DataTypeDateTimeSerDe::deserialize_one_cell_from_json(IColumn& column, Sl
     return Status::OK();
 }
 
+void DataTypeDateTimeSerDe::read_column_from_arrow(IColumn& column, const arrow::Array* arrow_array,
+                                                   int start, int end,
+                                                   const cctz::time_zone& ctz) const {
+    _read_column_from_arrow<false>(column, arrow_array, start, end, ctz);
+}
+
 void DataTypeDate64SerDe::write_column_to_arrow(const IColumn& column, const NullMap* null_map,
                                                 arrow::ArrayBuilder* array_builder, int start,
                                                 int end, const cctz::time_zone& ctz) const {
@@ -205,9 +211,10 @@ static int64_t time_unit_divisor(arrow::TimeUnit::type unit) {
     }
 }
 
-void DataTypeDate64SerDe::read_column_from_arrow(IColumn& column, const arrow::Array* arrow_array,
-                                                 int start, int end,
-                                                 const cctz::time_zone& ctz) const {
+template <bool is_date>
+void DataTypeDate64SerDe::_read_column_from_arrow(IColumn& column, const arrow::Array* arrow_array,
+                                                  int start, int end,
+                                                  const cctz::time_zone& ctz) const {
     auto& col_data = static_cast<ColumnVector<Int64>&>(column).get_data();
     int64_t divisor = 1;
     int64_t multiplier = 1;
@@ -246,18 +253,26 @@ void DataTypeDate64SerDe::read_column_from_arrow(IColumn& column, const arrow::A
         }
     } else if (arrow_array->type()->id() == arrow::Type::STRING) {
         // to be compatible with old version, we use string type for date.
-        auto concrete_array = dynamic_cast<const arrow::StringArray*>(arrow_array);
-        for (size_t value_i = start; value_i < end; ++value_i) {
-            Int64 val = 0;
+        const auto* concrete_array = dynamic_cast<const arrow::StringArray*>(arrow_array);
+        for (auto value_i = start; value_i < end; ++value_i) {
             auto val_str = concrete_array->GetString(value_i);
-            ReadBuffer rb(val_str.data(), val_str.size());
-            read_datetime_text_impl(val, rb, ctz);
-            col_data.emplace_back(val);
+            VecDateTimeValue v;
+            v.from_date_str(val_str.c_str(), val_str.length(), ctz);
+            if constexpr (is_date) {
+                v.cast_to_date();
+            }
+            col_data.emplace_back(binary_cast<VecDateTimeValue, Int64>(v));
         }
     } else {
         throw doris::Exception(doris::ErrorCode::INVALID_ARGUMENT,
                                "Unsupported Arrow Type: " + arrow_array->type()->name());
     }
+}
+
+void DataTypeDate64SerDe::read_column_from_arrow(IColumn& column, const arrow::Array* arrow_array,
+                                                 int start, int end,
+                                                 const cctz::time_zone& ctz) const {
+    _read_column_from_arrow<true>(column, arrow_array, start, end, ctz);
 }
 
 template <bool is_binary_format>
@@ -309,23 +324,47 @@ Status DataTypeDate64SerDe::write_column_to_orc(const std::string& timezone, con
     auto& col_data = static_cast<const ColumnVector<Int64>&>(column).get_data();
     orc::StringVectorBatch* cur_batch = dynamic_cast<orc::StringVectorBatch*>(orc_col_batch);
 
-    INIT_MEMORY_FOR_ORC_WRITER()
-
+    // First pass: calculate total memory needed and collect serialized values
+    std::vector<std::string> serialized_values;
+    std::vector<size_t> valid_row_indices;
+    size_t total_size = 0;
     for (size_t row_id = start; row_id < end; row_id++) {
-        if (cur_batch->notNull[row_id] == 0) {
-            continue;
+        if (cur_batch->notNull[row_id] == 1) {
+            char buf[64];
+            size_t len = binary_cast<Int64, VecDateTimeValue>(col_data[row_id]).to_buffer(buf);
+            total_size += len;
+            // avoid copy
+            serialized_values.emplace_back(buf, len);
+            valid_row_indices.push_back(row_id);
         }
-
-        int len = binary_cast<Int64, VecDateTimeValue>(col_data[row_id])
-                          .to_buffer(const_cast<char*>(bufferRef.data) + offset);
-
-        REALLOC_MEMORY_FOR_ORC_WRITER()
-
+    }
+    // Allocate continues memory based on calculated size
+    char* ptr = (char*)malloc(total_size);
+    if (!ptr) {
+        return Status::InternalError(
+                "malloc memory {} error when write variant column data to orc file.", total_size);
+    }
+    StringRef bufferRef;
+    bufferRef.data = ptr;
+    bufferRef.size = total_size;
+    buffer_list.emplace_back(bufferRef);
+    // Second pass: copy data to allocated memory
+    size_t offset = 0;
+    for (size_t i = 0; i < serialized_values.size(); i++) {
+        const auto& serialized_value = serialized_values[i];
+        size_t row_id = valid_row_indices[i];
+        size_t len = serialized_value.length();
+        if (offset + len > total_size) {
+            return Status::InternalError(
+                    "Buffer overflow when writing column data to ORC file. offset {} with len {} "
+                    "exceed total_size {} . ",
+                    offset, len, total_size);
+        }
+        memcpy(const_cast<char*>(bufferRef.data) + offset, serialized_value.data(), len);
         cur_batch->data[row_id] = const_cast<char*>(bufferRef.data) + offset;
         cur_batch->length[row_id] = len;
         offset += len;
     }
-
     cur_batch->numElements = end - start;
     return Status::OK();
 }

@@ -72,17 +72,88 @@ TEST(FunctionJsonTEST, GetJsonStringTest) {
     std::string func_name = "get_json_string";
     InputTypeSet input_types = {TypeIndex::String, TypeIndex::String};
     DataSet data_set = {
-            {{VARCHAR("{\"k1\":\"v1\", \"k2\":\"v2\"}"), VARCHAR("$.k1")}, VARCHAR("v1")},
-            {{VARCHAR("{\"k1\":\"v1\", \"my.key\":[\"e1\", \"e2\", \"e3\"]}"),
-              VARCHAR("$.\"my.key\"[1]")},
+            {{VARCHAR(R"({"k1":"v1", "k2":"v2"})"), VARCHAR("$.k1")}, VARCHAR("v1")},
+            {{VARCHAR(R"({"k1":"v1", "my.key":["e1", "e2", "e3"]})"), VARCHAR("$.\"my.key\"[1]")},
              VARCHAR("e2")},
-            {{VARCHAR("{\"k1.key\":{\"k2\":[\"v1\", \"v2\"]}}"), VARCHAR("$.\"k1.key\".k2[0]")},
+            {{VARCHAR(R"({"k1.key":{"k2":["v1", "v2"]}})"), VARCHAR("$.\"k1.key\".k2[0]")},
              VARCHAR("v1")},
-            {{VARCHAR("[{\"k1\":\"v1\"}, {\"k2\":\"v2\"}, {\"k1\":\"v3\"}, {\"k1\":\"v4\"}]"),
-              VARCHAR("$.k1")},
-             VARCHAR("[\"v1\",\"v3\",\"v4\"]")}};
+            {{VARCHAR(R"([{"k1":"v1"}, {"k2":"v2"}, {"k1":"v3"}, {"k1":"v4"}])"), VARCHAR("$.k1")},
+             Null()}};
 
     static_cast<void>(check_function<DataTypeString, true>(func_name, input_types, data_set));
+}
+
+TEST(FunctionJsonTEST, JsonExtractTest) {
+    std::string json_extract_name = "json_extract";
+    std::string json_extract_no_quotes_name = "json_extract_no_quotes";
+    InputTypeSet input_types = {TypeIndex::String, TypeIndex::String};
+
+    // json_extract root
+    DataSet data_set = {
+            {{Null(), STRING("$")}, Null()},
+            {{STRING("null"), STRING("$")}, STRING("null")},
+            {{STRING("true"), STRING("$")}, STRING("true")},
+            {{STRING("false"), STRING("$")}, STRING("false")},
+            {{STRING("100"), STRING("$")}, STRING("100")},                                 //int8
+            {{STRING("10000"), STRING("$")}, STRING("10000")},                             // int16
+            {{STRING("1000000000"), STRING("$")}, STRING("1000000000")},                   // int32
+            {{STRING("1152921504606846976"), STRING("$")}, STRING("1152921504606846976")}, // int64
+            {{STRING("6.18"), STRING("$")}, STRING("6.18")},                               // double
+            {{STRING("{}"), STRING("$")}, STRING("{}")}, // empty object
+
+            {{STRING(R"([1, 2, 3])"), STRING(R"($.[1])")}, STRING(R"(2)")},
+            {{STRING(R"({"id": 123, "name": "doris"})"), STRING(R"($.name)")},
+             STRING(R"("doris")")},
+            {{STRING(R"({"id": 123, "name": "doris"})"), STRING(R"($.id)")}, STRING(R"(123)")},
+            {{Null(), STRING(R"($.id)")}, Null()},
+            {{STRING(R"({"k1": "v1", "k2": { "k21": 6.6, "k22": [1, 2, 3] } })"),
+              STRING(R"($.k1)")},
+             STRING(R"("v1")")},
+            {{STRING(R"({"k1": "v1", "k2": { "k21": 6.6, "k22": [1, 2, 3] } })"),
+              STRING(R"($.k2.k21)")},
+             STRING(R"(6.6)")},
+            {{STRING(R"({"k1": "v1", "k2": { "k21": 6.6, "k22": [1, 2, 3] } })"),
+              STRING(R"($.k2.k22)")},
+             STRING(R"([1,2,3])")},
+            {{STRING(R"({"k1": "v1", "k2": { "k21": 6.6, "k22": [1, 2, 3] } })"),
+              STRING(R"($.k2.k22[1])")},
+             STRING(R"(2)")},
+    };
+
+    static_cast<void>(
+            check_function<DataTypeString, true>(json_extract_name, input_types, data_set));
+
+    data_set = {
+            {{Null(), STRING("$")}, Null()},
+            {{STRING("null"), STRING("$")}, STRING("null")},
+            {{STRING("true"), STRING("$")}, STRING("true")},
+            {{STRING("false"), STRING("$")}, STRING("false")},
+            {{STRING("100"), STRING("$")}, STRING("100")},                                 //int8
+            {{STRING("10000"), STRING("$")}, STRING("10000")},                             // int16
+            {{STRING("1000000000"), STRING("$")}, STRING("1000000000")},                   // int32
+            {{STRING("1152921504606846976"), STRING("$")}, STRING("1152921504606846976")}, // int64
+            {{STRING("6.18"), STRING("$")}, STRING("6.18")},                               // double
+            {{STRING("{}"), STRING("$")}, STRING("{}")}, // empty object
+
+            {{STRING(R"([1, 2, 3])"), STRING(R"($.[1])")}, STRING(R"(2)")},
+            {{STRING(R"({"id": 123, "name": "doris"})"), STRING(R"($.name)")}, STRING(R"(doris)")},
+            {{STRING(R"({"id": 123, "name": "doris"})"), STRING(R"($.id)")}, STRING(R"(123)")},
+            {{Null(), STRING(R"($.id)")}, Null()},
+            {{STRING(R"({"k1": "v1", "k2": { "k21": 6.6, "k22": [1, 2, 3] } })"),
+              STRING(R"($.k1)")},
+             STRING(R"(v1)")},
+            {{STRING(R"({"k1": "v1", "k2": { "k21": 6.6, "k22": [1, 2, 3] } })"),
+              STRING(R"($.k2.k21)")},
+             STRING(R"(6.6)")},
+            {{STRING(R"({"k1": "v1", "k2": { "k21": 6.6, "k22": [1, 2, 3] } })"),
+              STRING(R"($.k2.k22)")},
+             STRING(R"([1,2,3])")},
+            {{STRING(R"({"k1": "v1", "k2": { "k21": 6.6, "k22": [1, 2, 3] } })"),
+              STRING(R"($.k2.k22[1])")},
+             STRING(R"(2)")},
+    };
+    static_cast<void>(check_function<DataTypeString, true>(json_extract_no_quotes_name, input_types,
+                                                           data_set));
 }
 
 } // namespace doris::vectorized

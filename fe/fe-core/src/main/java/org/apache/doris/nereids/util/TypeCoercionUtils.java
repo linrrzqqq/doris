@@ -23,6 +23,8 @@ import org.apache.doris.catalog.Type;
 import org.apache.doris.common.Config;
 import org.apache.doris.nereids.annotation.Developing;
 import org.apache.doris.nereids.exceptions.AnalysisException;
+import org.apache.doris.nereids.rules.expression.ExpressionRewriteContext;
+import org.apache.doris.nereids.rules.expression.rules.FoldConstantRuleOnFE;
 import org.apache.doris.nereids.trees.expressions.Add;
 import org.apache.doris.nereids.trees.expressions.BinaryArithmetic;
 import org.apache.doris.nereids.trees.expressions.BinaryOperator;
@@ -150,6 +152,26 @@ public class TypeCoercionUtils {
     );
 
     private static final Logger LOG = LogManager.getLogger(TypeCoercionUtils.class);
+
+    /**
+     * ensure the result's data type equals to the originExpr's dataType,
+     * ATTN: this method usually used in fold constant rule
+     */
+    public static Expression ensureSameResultType(
+            Expression originExpr, Expression result, ExpressionRewriteContext context) {
+        DataType originDataType = originExpr.getDataType();
+        DataType newDataType = result.getDataType();
+        if (originDataType.equals(newDataType)) {
+            return result;
+        }
+        // backend can direct use all string like type without cast
+        if (originDataType.isStringLikeType() && newDataType.isStringLikeType()) {
+            return result;
+        }
+        return FoldConstantRuleOnFE.PATTERN_MATCH_INSTANCE.visitCast(
+                new Cast(result, originDataType), context
+        );
+    }
 
     /**
      * Return Optional.empty() if we cannot do implicit cast.
@@ -600,7 +622,7 @@ public class TypeCoercionUtils {
             } else if (dataType.isDateTimeType() && DateTimeChecker.isValidDateTime(value)) {
                 ret = DateTimeLiteral.parseDateTimeLiteral(value, false).orElse(null);
             } else if (dataType.isDateV2Type() && DateTimeChecker.isValidDateTime(value)) {
-                Result<DateLiteral, AnalysisException> parseResult = DateV2Literal.parseDateLiteral(value);
+                Result<DateLiteral, AnalysisException> parseResult = DateV2Literal.parseDateLiteral(value, true);
                 if (parseResult.isOk()) {
                     ret = parseResult.get();
                 } else {
@@ -611,7 +633,7 @@ public class TypeCoercionUtils {
                     }
                 }
             } else if (dataType.isDateType() && DateTimeChecker.isValidDateTime(value)) {
-                ret = DateLiteral.parseDateLiteral(value).orElse(null);
+                ret = DateLiteral.parseDateLiteral(value, false).orElse(null);
             }
         } catch (Exception e) {
             if (LOG.isDebugEnabled()) {

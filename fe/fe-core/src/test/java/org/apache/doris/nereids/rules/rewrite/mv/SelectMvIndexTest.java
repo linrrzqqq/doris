@@ -40,6 +40,7 @@ import org.apache.doris.qe.ConnectContext;
 import org.apache.doris.utframe.DorisAssert;
 
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
@@ -168,21 +169,11 @@ class SelectMvIndexTest extends BaseMaterializedIndexSelectTest implements MemoP
         createMv(createMVSql);
         ConnectContext.get().getState().setNereids(true);
         Env.getCurrentEnv().getCurrentCatalog().getDbOrAnalysisException("db1")
-                        .getOlapTableOrDdlException(EMPS_TABLE_NAME).getIndexIdToMeta()
-                        .forEach((id, meta) -> {
-                            if (meta.getWhereClause() != null) {
-                                meta.getWhereClause().setDisableTableName(false);
-                            }
-                        });
+                        .getOlapTableOrDdlException(EMPS_TABLE_NAME).getIndexIdToMeta();
         testMv(query1, EMPS_MV_NAME);
         ConnectContext.get().getState().setNereids(false);
         Env.getCurrentEnv().getCurrentCatalog().getDbOrAnalysisException("db1")
-                .getOlapTableOrDdlException(EMPS_TABLE_NAME).getIndexIdToMeta()
-                .forEach((id, meta) -> {
-                    if (meta.getWhereClause() != null) {
-                        meta.getWhereClause().setDisableTableName(true);
-                    }
-                });
+                .getOlapTableOrDdlException(EMPS_TABLE_NAME).getIndexIdToMeta();
     }
 
     @Test
@@ -1154,7 +1145,8 @@ class SelectMvIndexTest extends BaseMaterializedIndexSelectTest implements MemoP
         createMv("create materialized view mv2 as"
                 + "  select a, c, bitmap_union(to_bitmap(b)) from selectBitmapMvWithProjectMultiMv group by a, c;");
 
-        testMv("select a, bitmap_union_count(to_bitmap(b)) as cnt from selectBitmapMvWithProjectMultiMv group by a", "mv");
+        testMv("select a, bitmap_union_count(to_bitmap(b)) as cnt from selectBitmapMvWithProjectMultiMv group by a",
+                ImmutableSet.of("mv", "mv2"));
         dropTable("selectBitmapMvWithProjectMultiMv", true);
     }
 
@@ -1220,6 +1212,10 @@ class SelectMvIndexTest extends BaseMaterializedIndexSelectTest implements MemoP
 
     private void testMv(String sql, String indexName) {
         singleTableTest(sql, indexName, true);
+    }
+
+    private void testMv(String sql, Set<String> indexNameSet) {
+        singleTableTest(sql, indexNameSet, true);
     }
 
     private void assertOneAggFuncType(LogicalAggregate<? extends Plan> agg, Class<?> aggFuncType) {

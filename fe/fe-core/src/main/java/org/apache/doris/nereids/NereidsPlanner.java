@@ -358,7 +358,7 @@ public class NereidsPlanner extends Planner {
         }
     }
 
-    private void analyze(boolean showPlanProcess) {
+    protected void analyze(boolean showPlanProcess) {
         if (LOG.isDebugEnabled()) {
             LOG.debug("Start analyze plan");
         }
@@ -390,6 +390,7 @@ public class NereidsPlanner extends Planner {
         if (statementContext.getConnectContext().getExecutor() != null) {
             statementContext.getConnectContext().getExecutor().getSummaryProfile().setNereidsRewriteTime();
         }
+        cascadesContext.getStatementContext().getPlannerHooks().forEach(hook -> hook.afterRewrite(this));
     }
 
     // DependsRules: EnsureProjectOnTopJoin.class
@@ -652,6 +653,10 @@ public class NereidsPlanner extends Planner {
 
     @Override
     public String getExplainString(ExplainOptions explainOptions) {
+        ConnectContext context = cascadesContext == null ? ConnectContext.get() : cascadesContext.getConnectContext();
+        if (context.getSessionVariable().enableExplainNone) {
+            return "";
+        }
         ExplainLevel explainLevel = getExplainLevel(explainOptions);
         String plan = "";
         String mvSummary = "";
@@ -783,6 +788,9 @@ public class NereidsPlanner extends Planner {
             case "presto":
             case "trino":
                 statementContext.setFormatOptions(FormatOptions.getForPresto());
+                break;
+            case "hive":
+                statementContext.setFormatOptions(FormatOptions.getForHive());
                 break;
             case "doris":
                 statementContext.setFormatOptions(FormatOptions.getDefault());

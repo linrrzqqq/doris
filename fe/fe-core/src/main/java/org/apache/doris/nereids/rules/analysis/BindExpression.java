@@ -96,7 +96,6 @@ import org.apache.doris.nereids.util.ExpressionUtils;
 import org.apache.doris.nereids.util.PlanUtils;
 import org.apache.doris.nereids.util.TypeCoercionUtils;
 import org.apache.doris.nereids.util.Utils;
-import org.apache.doris.qe.ConnectContext;
 
 import com.google.common.base.Preconditions;
 import com.google.common.base.Suppliers;
@@ -923,12 +922,6 @@ public class BindExpression implements AnalysisRuleFactory {
                 break;
             }
         }
-
-        if (isGroupByContainAlias
-                && ConnectContext.get() != null
-                && ConnectContext.get().getSessionVariable().isGroupByAndHavingUseAliasFirst()) {
-            throw new AnalysisException("group_by_and_having_use_alias=true is unsupported for Nereids");
-        }
     }
 
     private boolean isAggregateFunction(UnboundFunction unboundFunction, FunctionRegistry functionRegistry) {
@@ -973,7 +966,7 @@ public class BindExpression implements AnalysisRuleFactory {
     private Scope toScope(CascadesContext cascadesContext, List<? extends Slot> slots) {
         Optional<Scope> outerScope = cascadesContext.getOuterScope();
         if (outerScope.isPresent()) {
-            return new Scope(outerScope, slots, outerScope.get().getSubquery());
+            return new Scope(outerScope, slots);
         } else {
             return new Scope(slots);
         }

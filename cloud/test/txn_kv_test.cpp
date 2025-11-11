@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include "meta-service/txn_kv.h"
+#include "meta-store/txn_kv.h"
 
 #include <bthread/bthread.h>
 #include <fmt/format.h>
@@ -30,15 +30,17 @@
 #include <thread>
 
 #include "common/config.h"
+#include "common/defer.h"
 #include "common/stopwatch.h"
 #include "common/util.h"
 #include "cpp/sync_point.h"
-#include "meta-service/codec.h"
 #include "meta-service/doris_txn.h"
-#include "meta-service/keys.h"
-#include "meta-service/mem_txn_kv.h"
-#include "meta-service/txn_kv.h"
-#include "meta-service/txn_kv_error.h"
+#include "meta-store/blob_message.h"
+#include "meta-store/codec.h"
+#include "meta-store/keys.h"
+#include "meta-store/mem_txn_kv.h"
+#include "meta-store/txn_kv.h"
+#include "meta-store/txn_kv_error.h"
 
 using namespace doris::cloud;
 
@@ -250,7 +252,7 @@ TEST(TxnKvTest, CompatibleGetTest) {
     ASSERT_EQ(txn_kv->create_txn(&txn), TxnErrorCode::TXN_OK);
     ASSERT_EQ(doris::cloud::key_exists(txn.get(), key), TxnErrorCode::TXN_KEY_NOT_FOUND);
     ValueBuf val_buf;
-    ASSERT_EQ(doris::cloud::get(txn.get(), key, &val_buf), TxnErrorCode::TXN_KEY_NOT_FOUND);
+    ASSERT_EQ(doris::cloud::blob_get(txn.get(), key, &val_buf), TxnErrorCode::TXN_KEY_NOT_FOUND);
     txn->put(key, val);
     ASSERT_EQ(txn->commit(), TxnErrorCode::TXN_OK);
 
@@ -259,7 +261,7 @@ TEST(TxnKvTest, CompatibleGetTest) {
     ASSERT_EQ(err, TxnErrorCode::TXN_OK);
     err = doris::cloud::key_exists(txn.get(), key);
     ASSERT_EQ(err, TxnErrorCode::TXN_OK);
-    err = doris::cloud::get(txn.get(), key, &val_buf);
+    err = doris::cloud::blob_get(txn.get(), key, &val_buf);
     ASSERT_EQ(err, TxnErrorCode::TXN_OK);
     EXPECT_EQ(val_buf.ver, 0);
     doris::TabletSchemaCloudPB saved_schema;
@@ -277,15 +279,16 @@ TEST(TxnKvTest, CompatibleGetTest) {
     // Check remove
     ASSERT_EQ(txn_kv->create_txn(&txn), TxnErrorCode::TXN_OK);
     ASSERT_EQ(doris::cloud::key_exists(txn.get(), key), TxnErrorCode::TXN_KEY_NOT_FOUND);
-    ASSERT_EQ(doris::cloud::get(txn.get(), key, &val_buf), TxnErrorCode::TXN_KEY_NOT_FOUND);
+    ASSERT_EQ(doris::cloud::blob_get(txn.get(), key, &val_buf), TxnErrorCode::TXN_KEY_NOT_FOUND);
 }
 
 TEST(TxnKvTest, PutLargeValueTest) {
     auto txn_kv = std::make_shared<MemTxnKv>();
 
     auto sp = doris::SyncPoint::get_instance();
-    std::unique_ptr<int, std::function<void(int*)>> defer(
-            (int*)0x01, [](int*) { doris::SyncPoint::get_instance()->clear_all_call_backs(); });
+    DORIS_CLOUD_DEFER {
+        doris::SyncPoint::get_instance()->clear_all_call_backs();
+    };
     sp->enable_processing();
 
     doris::TabletSchemaCloudPB schema;
@@ -305,7 +308,7 @@ TEST(TxnKvTest, PutLargeValueTest) {
     auto key = meta_schema_key({instance_id, 10005, 1});
     std::unique_ptr<Transaction> txn;
     ASSERT_EQ(txn_kv->create_txn(&txn), TxnErrorCode::TXN_OK);
-    doris::cloud::put(txn.get(), key, schema, 1, 100);
+    doris::cloud::blob_put(txn.get(), key, schema, 1, 100);
     ASSERT_EQ(txn->commit(), TxnErrorCode::TXN_OK);
 
     // Check get
@@ -313,7 +316,7 @@ TEST(TxnKvTest, PutLargeValueTest) {
     ValueBuf val_buf;
     doris::TabletSchemaCloudPB saved_schema;
     ASSERT_EQ(doris::cloud::key_exists(txn.get(), key), TxnErrorCode::TXN_OK);
-    TxnErrorCode err = doris::cloud::get(txn.get(), key, &val_buf);
+    TxnErrorCode err = doris::cloud::blob_get(txn.get(), key, &val_buf);
     ASSERT_EQ(err, TxnErrorCode::TXN_OK);
     std::cout << "num iterators=" << val_buf.iters.size() << std::endl;
     EXPECT_EQ(val_buf.ver, 1);
@@ -329,7 +332,7 @@ TEST(TxnKvTest, PutLargeValueTest) {
         auto* limit = doris::try_any_cast<int*>(args[0]);
         *limit = 100;
     });
-    err = doris::cloud::get(txn.get(), key, &val_buf);
+    err = doris::cloud::blob_get(txn.get(), key, &val_buf);
     ASSERT_EQ(err, TxnErrorCode::TXN_OK);
     std::cout << "num iterators=" << val_buf.iters.size() << std::endl;
     EXPECT_EQ(val_buf.ver, 1);
@@ -364,7 +367,7 @@ TEST(TxnKvTest, PutLargeValueTest) {
     // Check remove
     ASSERT_EQ(txn_kv->create_txn(&txn), TxnErrorCode::TXN_OK);
     ASSERT_EQ(doris::cloud::key_exists(txn.get(), key), TxnErrorCode::TXN_KEY_NOT_FOUND);
-    ASSERT_EQ(doris::cloud::get(txn.get(), key, &val_buf), TxnErrorCode::TXN_KEY_NOT_FOUND);
+    ASSERT_EQ(doris::cloud::blob_get(txn.get(), key, &val_buf), TxnErrorCode::TXN_KEY_NOT_FOUND);
 }
 
 TEST(TxnKvTest, RangeGetIteratorContinue) {
@@ -573,8 +576,9 @@ TEST(TxnKvTest, FullRangeGetIterator) {
     encode_int64(INT64_MAX, &end);
 
     auto* sp = doris::SyncPoint::get_instance();
-    std::unique_ptr<int, std::function<void(int*)>> defer(
-            (int*)0x01, [](int*) { doris::SyncPoint::get_instance()->clear_all_call_backs(); });
+    DORIS_CLOUD_DEFER {
+        doris::SyncPoint::get_instance()->clear_all_call_backs();
+    };
     sp->enable_processing();
 
     {
@@ -814,4 +818,43 @@ TEST(TxnKvTest, FullRangeGetIterator) {
                   << std::chrono::duration_cast<std::chrono::milliseconds>(finish - start).count()
                   << "ms" << std::endl;
     }
+}
+
+TEST(TxnKvTest, ReportConflictingRange) {
+    config::enable_logging_conflict_keys = true;
+
+    constexpr std::string_view key_prefix = "txn_kv_test__report_conflicting_range";
+    std::string key = std::string(key_prefix) + std::to_string(time(nullptr));
+
+    {
+        // 1. write a common key
+        std::unique_ptr<Transaction> txn;
+        ASSERT_EQ(txn_kv->create_txn(&txn), TxnErrorCode::TXN_OK);
+        txn->put(key, "value0");
+        ASSERT_EQ(txn->commit(), TxnErrorCode::TXN_OK);
+    }
+
+    // 2. two txns, conflicting writes
+    std::unique_ptr<Transaction> txn1, txn2;
+    ASSERT_EQ(txn_kv->create_txn(&txn1), TxnErrorCode::TXN_OK);
+    ASSERT_EQ(txn_kv->create_txn(&txn2), TxnErrorCode::TXN_OK);
+
+    std::string val1, val2;
+    ASSERT_EQ(txn1->get(key, &val1), TxnErrorCode::TXN_OK);
+    ASSERT_EQ(txn2->get(key, &val2), TxnErrorCode::TXN_OK);
+
+    txn1->put(key, "value1");
+    txn2->put(key, "value2");
+
+    ASSERT_EQ(txn1->commit(), TxnErrorCode::TXN_OK);
+    ASSERT_EQ(txn2->commit(), TxnErrorCode::TXN_CONFLICT);
+
+    // 3. get the conflicting ranges.
+    std::vector<std::pair<std::string, std::string>> values;
+    ASSERT_EQ(reinterpret_cast<fdb::Transaction*>(txn2.get())->get_conflicting_range(&values),
+              TxnErrorCode::TXN_OK);
+    ASSERT_EQ(values.size(), 2);
+    ASSERT_EQ(values[0].first, key);
+    ASSERT_EQ(values[1].second, "0");
+    ASSERT_TRUE(values[1].first.starts_with(key));
 }

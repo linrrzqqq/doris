@@ -17,6 +17,7 @@
 
 #include "agent/task_worker_pool.h"
 
+#include <brpc/controller.h>
 #include <fmt/format.h>
 #include <gen_cpp/AgentService_types.h>
 #include <gen_cpp/DataSinks_types.h>
@@ -84,6 +85,7 @@
 #include "runtime/memory/global_memory_arbitrator.h"
 #include "runtime/snapshot_loader.h"
 #include "service/backend_options.h"
+#include "util/brpc_client_cache.h"
 #include "util/debug_points.h"
 #include "util/doris_metrics.h"
 #include "util/jni-util.h"
@@ -291,7 +293,7 @@ void alter_cloud_tablet(CloudStorageEngine& engine, const TAgentTaskRequest& age
                 job.process_alter_tablet(agent_task_req.alter_tablet_req_v2),
                 [&](const doris::Exception& ex) {
                     DorisMetrics::instance()->create_rollup_requests_failed->increment(1);
-                    job.clean_up_on_failed();
+                    job.clean_up_on_failure();
                 });
         return Status::OK();
     }();
@@ -490,11 +492,14 @@ void add_task_count(const TAgentTaskRequest& task, int n) {
     {
         ALTER_count << n;
         // cloud auto stop need sc jobs, a tablet's sc can also be considered a fragment
-        doris::g_fragment_executing_count << 1;
-        int64 now = duration_cast<std::chrono::milliseconds>(
-                            std::chrono::system_clock::now().time_since_epoch())
-                            .count();
-        g_fragment_last_active_time.set_value(now);
+        if (n > 0) {
+            // only count fragment when task is actually starting
+            doris::g_fragment_executing_count << 1;
+            int64_t now = duration_cast<std::chrono::milliseconds>(
+                                std::chrono::system_clock::now().time_since_epoch())
+                                .count();
+            g_fragment_last_active_time.set_value(now);
+        }
         return;
     }
     default:
@@ -602,6 +607,52 @@ Status PriorTaskWorkerPool::submit_task(const TAgentTaskRequest& task) {
         }
         return Status::OK();
     });
+}
+
+Status PriorTaskWorkerPool::submit_high_prior_and_cancel_low(const TAgentTaskRequest& task) {
+    const TTaskType::type task_type = task.task_type;
+    int64_t signature = task.signature;
+    std::string type_str;
+    EnumToString(TTaskType, task_type, type_str);
+    auto req = std::make_unique<TAgentTaskRequest>(task);
+
+    DCHECK(req->__isset.priority && req->priority == TPriority::HIGH);
+    do {
+        std::lock_guard lock(s_task_signatures_mtx);
+        auto& set = s_task_signatures[task_type];
+        if (!set.contains(signature)) {
+            // If it doesn't exist, put it directly into the priority queue
+            add_task_count(*req, 1);
+            set.insert(signature);
+            std::lock_guard lock(_mtx);
+            _high_prior_queue.push_back(std::move(req));
+            _high_prior_condv.notify_one();
+            _normal_condv.notify_one();
+            break;
+        } else {
+            std::lock_guard lock(_mtx);
+            for (auto it = _normal_queue.begin(); it != _normal_queue.end();) {
+                // If it exists in the normal queue, cancel the task in the normal queue
+                if ((*it)->signature == signature) {
+                    _normal_queue.erase(it);                     // cancel the original task
+                    _high_prior_queue.push_back(std::move(req)); // add the new task to the queue
+                    _high_prior_condv.notify_one();
+                    _normal_condv.notify_one();
+                    break;
+                } else {
+                    ++it; // doesn't meet the condition, continue to the next one
+                }
+            }
+            // If it exists in the high priority queue, no operation is needed
+            LOG_INFO("task has already existed in high prior queue.").tag("signature", signature);
+        }
+    } while (false);
+
+    // Set the receiving time of task so that we can determine whether it is timed out later
+    (const_cast<TAgentTaskRequest&>(task)).__set_recv_time(time(nullptr));
+
+    LOG_INFO("successfully submit task").tag("type", type_str).tag("signature", signature);
+    return Status::OK();
 }
 
 void PriorTaskWorkerPool::normal_loop() {
@@ -1432,15 +1483,7 @@ void update_s3_resource(const TStorageResource& param, io::RemoteFileSystemSPtr 
         DCHECK_EQ(existed_fs->type(), io::FileSystemType::S3) << param.id << ' ' << param.name;
         auto client = static_cast<io::S3FileSystem*>(existed_fs.get())->client_holder();
         auto new_s3_conf = S3Conf::get_s3_conf(param.s3_storage_param);
-        S3ClientConf conf {
-                .endpoint {},
-                .region {},
-                .ak = std::move(new_s3_conf.client_conf.ak),
-                .sk = std::move(new_s3_conf.client_conf.sk),
-                .token = std::move(new_s3_conf.client_conf.token),
-                .bucket {},
-                .provider = new_s3_conf.client_conf.provider,
-        };
+        S3ClientConf conf = std::move(new_s3_conf.client_conf);
         st = client->reset(conf);
         fs = std::move(existed_fs);
     }
@@ -1448,7 +1491,7 @@ void update_s3_resource(const TStorageResource& param, io::RemoteFileSystemSPtr 
     if (!st.ok()) {
         LOG(WARNING) << "update s3 resource failed: " << st;
     } else {
-        LOG_INFO("successfully update hdfs resource")
+        LOG_INFO("successfully update s3 resource")
                 .tag("resource_id", param.id)
                 .tag("resource_name", param.name);
         put_storage_resource(param.id, {std::move(fs)}, param.version);
@@ -1893,8 +1936,9 @@ void PublishVersionWorkerPool::publish_version_callback(const TAgentTaskRequest&
                     if (!tablet->tablet_meta()->tablet_schema()->disable_auto_compaction()) {
                         tablet->published_count.fetch_add(1);
                         int64_t published_count = tablet->published_count.load();
+                        int32_t max_version_config = tablet->max_version_config();
                         if (tablet->exceed_version_limit(
-                                    config::max_tablet_version_num *
+                                    max_version_config *
                                     config::load_trigger_compaction_version_percent / 100) &&
                             published_count % 20 == 0) {
                             auto st = _engine.submit_compaction_task(
@@ -2135,6 +2179,12 @@ void calc_delete_bitmap_callback(CloudStorageEngine& engine, const TAgentTaskReq
     CloudEngineCalcDeleteBitmapTask engine_task(engine, calc_delete_bitmap_req, &error_tablet_ids,
                                                 &succ_tablet_ids);
     SCOPED_ATTACH_TASK(engine_task.mem_tracker());
+    if (req.signature != calc_delete_bitmap_req.transaction_id) {
+        // transaction_id may not be the same as req.signature, so add a log here
+        LOG_INFO("begin to execute calc delete bitmap task")
+                .tag("signature", req.signature)
+                .tag("transaction_id", calc_delete_bitmap_req.transaction_id);
+    }
     status = engine_task.execute();
 
     TFinishTaskRequest finish_task_request;

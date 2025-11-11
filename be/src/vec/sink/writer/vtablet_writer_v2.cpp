@@ -99,9 +99,7 @@ Status VTabletWriterV2::_incremental_open_streams(
                     tablet.set_partition_id(partition->id);
                     tablet.set_index_id(index.index_id);
                     tablet.set_tablet_id(tablet_id);
-                    if (!_load_stream_map->contains(node)) {
-                        new_backends.insert(node);
-                    }
+                    new_backends.insert(node);
                     _tablets_for_node[node].emplace(tablet_id, tablet);
                     if (known_indexes.contains(index.index_id)) [[likely]] {
                         continue;
@@ -594,6 +592,11 @@ Status VTabletWriterV2::close(Status exec_status) {
         status = _send_new_partition_batch();
     }
 
+    DBUG_EXECUTE_IF("VTabletWriterV2.close.sleep", {
+        auto sleep_sec = DebugPoints::instance()->get_debug_param_or_default<int32_t>(
+                "VTabletWriterV2.close.sleep", "sleep_sec", 1);
+        std::this_thread::sleep_for(std::chrono::seconds(sleep_sec));
+    });
     DBUG_EXECUTE_IF("VTabletWriterV2.close.cancel",
                     { status = Status::InternalError("load cancel"); });
     if (status.ok()) {

@@ -1785,4 +1785,184 @@ TEST(VTimestampFunctionsTest, year_of_week_test) {
     }
 }
 
+TEST(VTimestampFunctionsTest, months_between_test) {
+    std::string func_name = "months_between";
+    BaseInputTypeSet input_types = {TypeIndex::DateV2, TypeIndex::DateV2, TypeIndex::UInt8};
+    DataSet data_set = {
+            {{std::string("2020-01-01"), std::string("2020-02-01"), uint8_t(0)}, double(-1.0)},
+            {{std::string("2020-01-01"), std::string("2020-03-01"), uint8_t(1)}, double(-2.0)},
+            {{std::string("2020-01-01"), std::string("2020-04-01"), uint8_t(0)}, double(-3.0)},
+            {{std::string("2020-01-01"), std::string("2020-12-01"), uint8_t(1)}, double(-11.0)},
+            {{std::string("2020-01-01"), std::string("2021-01-01"), uint8_t(0)}, double(-12.0)},
+            {{std::string("2020-01-01"), std::string("2022-01-01"), uint8_t(1)}, double(-24.0)},
+            {{std::string("2020-01-01"), std::string("2020-01-01"), uint8_t(0)}, double(0.0)},
+            {{std::string("2020-12-01"), std::string("2020-01-01"), uint8_t(1)}, double(11.0)},
+            {{std::string("2021-01-01"), std::string("2020-01-01"), uint8_t(0)}, double(12.0)},
+            {{std::string("2022-01-01"), std::string("2020-01-01"), uint8_t(1)}, double(24.0)},
+            {{std::string(""), std::string("2020-01-01"), uint8_t(1)}, Null()},
+            {{std::string("2020-01-01"), std::string(""), uint8_t(1)}, Null()},
+            {{Null(), std::string("2020-01-01"), uint8_t(1)}, Null()},
+            {{std::string("2020-01-01"), Null(), uint8_t(1)}, Null()}};
+    static_cast<void>(
+            check_function_all_arg_comb<DataTypeFloat64, true>(func_name, input_types, data_set));
+}
+
+TEST(VTimestampFunctionsTest, next_day_test) {
+    std::string func_name = "next_day";
+    BaseInputTypeSet input_types = {TypeIndex::DateV2, TypeIndex::String};
+    {
+        DataSet data_set = {{{std::string("2020-01-01"), std::string("MO")},
+                             str_to_date_v2("2020-01-06", "%Y-%m-%d")},
+                            {{std::string("2020-01-01"), std::string("MON")},
+                             str_to_date_v2("2020-01-06", "%Y-%m-%d")},
+                            {{std::string("2020-01-01"), std::string("MONDAY")},
+                             str_to_date_v2("2020-01-06", "%Y-%m-%d")},
+                            {{std::string("2020-01-01"), std::string("TU")},
+                             str_to_date_v2("2020-01-07", "%Y-%m-%d")},
+                            {{std::string("2020-01-01"), std::string("TUE")},
+                             str_to_date_v2("2020-01-07", "%Y-%m-%d")},
+                            {{std::string("2020-01-01"), std::string("TUESDAY")},
+                             str_to_date_v2("2020-01-07", "%Y-%m-%d")},
+                            {{std::string("2020-01-01"), std::string("WE")},
+                             str_to_date_v2("2020-01-08", "%Y-%m-%d")},
+                            {{std::string("2020-01-01"), std::string("WED")},
+                             str_to_date_v2("2020-01-08", "%Y-%m-%d")},
+                            {{std::string("2020-01-01"), std::string("WEDNESDAY")},
+                             str_to_date_v2("2020-01-08", "%Y-%m-%d")},
+                            {{std::string("2020-01-01"), std::string("TH")},
+                             str_to_date_v2("2020-01-02", "%Y-%m-%d")},
+                            {{std::string("2020-01-01"), std::string("THU")},
+                             str_to_date_v2("2020-01-02", "%Y-%m-%d")},
+                            {{std::string("2020-01-01"), std::string("THURSDAY")},
+                             str_to_date_v2("2020-01-02", "%Y-%m-%d")},
+                            {{std::string("2020-01-01"), std::string("FR")},
+                             str_to_date_v2("2020-01-03", "%Y-%m-%d")},
+                            {{std::string("2020-01-01"), std::string("FRI")},
+                             str_to_date_v2("2020-01-03", "%Y-%m-%d")},
+                            {{std::string("2020-01-01"), std::string("FRIDAY")},
+                             str_to_date_v2("2020-01-03", "%Y-%m-%d")},
+                            {{std::string("2020-01-01"), std::string("SA")},
+                             str_to_date_v2("2020-01-04", "%Y-%m-%d")},
+                            {{std::string("2020-01-01"), std::string("SAT")},
+                             str_to_date_v2("2020-01-04", "%Y-%m-%d")},
+                            {{std::string("2020-01-01"), std::string("SATURDAY")},
+                             str_to_date_v2("2020-01-04", "%Y-%m-%d")},
+                            {{std::string("2020-01-01"), std::string("SU")},
+                             str_to_date_v2("2020-01-05", "%Y-%m-%d")},
+                            {{std::string("2020-01-01"), std::string("SUN")},
+                             str_to_date_v2("2020-01-05", "%Y-%m-%d")},
+                            {{std::string("2020-01-01"), std::string("SUNDAY")},
+                             str_to_date_v2("2020-01-05", "%Y-%m-%d")},
+                            {{std::string(""), std::string("MON")}, Null()},
+                            {{Null(), std::string("MON")}, Null()}};
+        static_cast<void>(check_function_all_arg_comb<DataTypeDateV2, true>(func_name, input_types,
+                                                                            data_set));
+    }
+    {
+        DataSet data_set = {// date over month
+                            {{std::string("2020-01-28"), std::string("MON")},
+                             str_to_date_v2("2020-02-03", "%Y-%m-%d")},
+                            {{std::string("2020-01-31"), std::string("SAT")},
+                             str_to_date_v2("2020-02-01", "%Y-%m-%d")},
+
+                            // date over year
+                            {{std::string("2020-12-28"), std::string("FRI")},
+                             str_to_date_v2("2021-01-01", "%Y-%m-%d")},
+                            {{std::string("2020-12-31"), std::string("THU")},
+                             str_to_date_v2("2021-01-07", "%Y-%m-%d")},
+
+                            // leap year(29 Feb)
+                            {{std::string("2020-02-27"), std::string("SAT")},
+                             str_to_date_v2("2020-02-29", "%Y-%m-%d")},
+                            {{std::string("2020-02-29"), std::string("MON")},
+                             str_to_date_v2("2020-03-02", "%Y-%m-%d")},
+
+                            // non leap year(28 Feb)
+                            {{std::string("2019-02-26"), std::string("THU")},
+                             str_to_date_v2("2019-02-28", "%Y-%m-%d")},
+                            {{std::string("2019-02-28"), std::string("SUN")},
+                             str_to_date_v2("2019-03-03", "%Y-%m-%d")},
+
+                            // date over month
+                            {{std::string("2020-04-29"), std::string("FRI")},
+                             str_to_date_v2("2020-05-01", "%Y-%m-%d")},
+                            {{std::string("2020-05-31"), std::string("MON")},
+                             str_to_date_v2("2020-06-01", "%Y-%m-%d")}};
+        static_cast<void>(check_function_all_arg_comb<DataTypeDateV2, true>(func_name, input_types,
+                                                                            data_set));
+    }
+}
+
+TEST(VTimestampFunctionsTest, from_iso8601_date) {
+    std::string func_name = "from_iso8601_date";
+    InputTypeSet input_types = {TypeIndex::String};
+
+    DataSet data_set = {
+            {{std::string("2020-01-01")}, str_to_date_v2("2020-01-01", "%Y-%m-%d")},
+            {{std::string("2020-01-01")}, str_to_date_v2("2020-01-01", "%Y-%m-%d")},
+            {{std::string("-1")}, Null()},
+            {{std::string("2025-07-11")}, str_to_date_v2("2025-07-11", "%Y-%m-%d")},
+            {{std::string("2024-02-29")}, str_to_date_v2("2024-02-29", "%Y-%m-%d")},
+            {{std::string("2025-02-29")}, Null()},
+            {{std::string("2025-13-01")}, Null()},
+            {{std::string("2020-W10")}, str_to_date_v2("2020-03-02", "%Y-%m-%d")},
+            {{std::string("2025-W28")}, str_to_date_v2("2025-07-07", "%Y-%m-%d")},
+            {{std::string("2025-W53")}, str_to_date_v2("2025-12-29", "%Y-%m-%d")},
+            {{std::string("2025-W00")}, Null()},
+            {{std::string("2020-123")}, str_to_date_v2("2020-05-02", "%Y-%m-%d")},
+            {{std::string("2025-192")}, str_to_date_v2("2025-07-11", "%Y-%m-%d")},
+            {{std::string("2024-366")}, str_to_date_v2("2024-12-31", "%Y-%m-%d")},
+            {{std::string("2025-366")}, Null()},
+            {{std::string("2025-000")}, str_to_date_v2("2024-12-31", "%Y-%m-%d")},
+            {{std::string("2025/07/11")}, Null()},
+            {{std::string("25-07-11")}, Null()},
+            {{std::string("2025-7-11")}, Null()},
+            {{std::string("invalid-date")}, Null()},
+            {{std::string("2025-07-11T12:34:56")}, Null()},
+            {{std::string("-1")}, Null()},
+            {{std::string("9999-12-31")}, str_to_date_v2("9999-12-31", "%Y-%m-%d")},
+            {{std::string("10000-01-01")}, Null()},
+            {{std::string("0001-01-01")}, str_to_date_v2("0001-01-01", "%Y-%m-%d")},
+            {{std::string("0000-12-31")}, str_to_date_v2("0000-12-31", "%Y-%m-%d")},
+            {{std::string("-0001-01-01")}, Null()},
+            {{std::string("2025-01-01")}, str_to_date_v2("2025-01-01", "%Y-%m-%d")},
+            {{std::string("2025-12-31")}, str_to_date_v2("2025-12-31", "%Y-%m-%d")},
+            {{std::string("2025-00-01")}, Null()},
+            {{std::string("2025-13-01")}, Null()},
+            {{std::string("2025--01-01")}, Null()},
+            {{std::string("2025-01-31")}, str_to_date_v2("2025-01-31", "%Y-%m-%d")},
+            {{std::string("2025-04-30")}, str_to_date_v2("2025-04-30", "%Y-%m-%d")},
+            {{std::string("2025-02-28")}, str_to_date_v2("2025-02-28", "%Y-%m-%d")},
+            {{std::string("2024-02-29")}, str_to_date_v2("2024-02-29", "%Y-%m-%d")},
+            {{std::string("2025-01-32")}, Null()},
+            {{std::string("2025-04-31")}, Null()},
+            {{std::string("2025-02-29")}, Null()},
+            {{std::string("2025-02-30")}, Null()},
+            {{std::string("2025-01-00")}, Null()},
+            {{std::string("2025-01--01")}, Null()},
+            {{std::string("2000-02-29")}, str_to_date_v2("2000-02-29", "%Y-%m-%d")},
+            {{std::string("2024-02-29")}, str_to_date_v2("2024-02-29", "%Y-%m-%d")},
+            {{std::string("1900-02-29")}, Null()},
+            {{std::string("2100-02-29")}, Null()},
+            {{std::string("2025-02-29")}, Null()},
+            {{std::string("-2025-01-01")}, Null()},
+            {{std::string("2025--07-01")}, Null()},
+            {{std::string("2025-07--01")}, Null()},
+            {{std::string("")}, Null()},
+            {{std::string("2025")}, str_to_date_v2("2025-01-01", "%Y-%m-%d")},
+            {{std::string("2025-07")}, str_to_date_v2("2025-07-01", "%Y-%m-%d")},
+            {{std::string("99999-01-01")}, Null()},
+            {{std::string("2025-123-01")}, Null()},
+            {{std::string("2025-01-123")}, Null()},
+            {{std::string("2025/01/01")}, Null()},
+            {{std::string("2025.01.01")}, Null()},
+            {{std::string("2025-01-01X")}, Null()},
+            {{std::string("2025--01--01")}, Null()},
+            {{std::string("abcd-01-01")}, Null()},
+            {{std::string("2025-ab-01")}, Null()},
+            {{std::string("2025-01-ab")}, Null()},
+    };
+
+    static_cast<void>(check_function<DataTypeDateV2, true>(func_name, input_types, data_set));
+}
 } // namespace doris::vectorized

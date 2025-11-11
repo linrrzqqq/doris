@@ -67,8 +67,6 @@ enum class FileCachePolicy : uint8_t;
 
 namespace doris::vectorized {
 
-const static Slice _s_null_slice = Slice("\\N");
-
 void EncloseCsvTextFieldSplitter::do_split(const Slice& line, std::vector<Slice>* splitted_values) {
     const char* data = line.data;
     const auto& column_sep_positions = _text_line_reader_ctx->column_sep_positions();
@@ -302,8 +300,12 @@ Status CsvReader::init_reader(bool is_load) {
              _file_compress_type != TFileCompressType::PLAIN)) {
             return Status::InternalError<false>("For now we do not support split compressed file");
         }
-        start_offset -= 1;
-        _size += 1;
+        // pre-read to promise first line skipped always read
+        int64_t pre_read_len = std::min(
+                static_cast<int64_t>(_params.file_attributes.text_params.line_delimiter.size()),
+                start_offset);
+        start_offset -= pre_read_len;
+        _size += pre_read_len;
         // not first range will always skip one line
         _skip_lines = 1;
     }
@@ -341,7 +343,8 @@ Status CsvReader::init_reader(bool is_load) {
             (_state != nullptr && _state->trim_tailing_spaces_for_external_table_query());
 
     _options.escape_char = _escape;
-    if (_params.file_attributes.text_params.collection_delimiter.size() == 0) {
+    _options.quote_char = _enclose;
+    if (_params.file_attributes.text_params.collection_delimiter.empty()) {
         switch (_text_serde_type) {
         case TTextSerdeType::JSON_TEXT_SERDE:
             _options.collection_delim = ',';
@@ -628,8 +631,8 @@ Status CsvReader::deserialize_nullable_string(IColumn& column, Slice& slice) {
         }
     }
     static DataTypeStringSerDe stringSerDe;
-    auto st = stringSerDe.deserialize_one_cell_from_json(null_column.get_nested_column(), slice,
-                                                         _options);
+    auto st = stringSerDe.deserialize_one_cell_from_csv(null_column.get_nested_column(), slice,
+                                                        _options);
     if (!st.ok()) {
         // fill null if fail
         null_column.insert_data(nullptr, 0); // 0 is meaningless here
@@ -654,7 +657,9 @@ Status CsvReader::_fill_dest_columns(const Slice& line, Block* block,
         int col_idx = _col_idxs[i];
         // col idx is out of range, fill with null.
         const Slice& value =
-                col_idx < _split_values.size() ? _split_values[col_idx] : _s_null_slice;
+                col_idx < _split_values.size()
+                        ? _split_values[col_idx]
+                        : Slice {_options.null_format, static_cast<size_t>(_options.null_len)};
         Slice slice {value.data, value.size};
 
         IColumn* col_ptr = columns[i];
@@ -681,7 +686,7 @@ Status CsvReader::_fill_dest_columns(const Slice& line, Block* block,
             switch (_text_serde_type) {
             case TTextSerdeType::JSON_TEXT_SERDE:
                 RETURN_IF_ERROR(
-                        _serdes[i]->deserialize_one_cell_from_json(*col_ptr, slice, _options));
+                        _serdes[i]->deserialize_one_cell_from_csv(*col_ptr, slice, _options));
                 break;
             case TTextSerdeType::HIVE_TEXT_SERDE:
                 RETURN_IF_ERROR(

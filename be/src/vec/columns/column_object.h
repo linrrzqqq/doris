@@ -97,6 +97,9 @@ public:
     constexpr static TypeIndex MOST_COMMON_TYPE_ID = TypeIndex::JSONB;
     // Nullable(Array(Nullable(Object)))
     const static DataTypePtr NESTED_TYPE;
+    // Array(Nullable(Jsonb))
+    const static DataTypePtr NESTED_TYPE_AS_ARRAY_OF_JSONB;
+
     // Finlize mode for subcolumns, write mode will estimate which subcolumns are sparse columns(too many null values inside column),
     // merge and encode them into a shared column in root column. Only affects in flush block to segments.
     // Otherwise read mode should be as default mode.
@@ -177,6 +180,9 @@ public:
 
         void add_new_column_part(DataTypePtr type);
 
+        /// Converts Array<String> to Array<JsonbField> for special case handling
+        static void convert_array_string_to_array_jsonb(Field& array_field);
+
         friend class ColumnObject;
 
     private:
@@ -233,7 +239,7 @@ public:
         // the root Node should be JSONB type when finalize
         bool is_root = false;
     };
-    using Subcolumns = SubcolumnsTree<Subcolumn>;
+    using Subcolumns = SubcolumnsTree<Subcolumn, false>;
 
 private:
     /// If true then all subcolumns are nullable.

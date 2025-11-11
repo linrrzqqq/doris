@@ -37,6 +37,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "agent/task_worker_pool.h"
 #include "common/config.h"
 #include "common/status.h"
 #include "gutil/ref_counted.h"
@@ -109,7 +110,8 @@ public:
     virtual Status start_bg_threads() = 0;
 
     virtual Result<BaseTabletSPtr> get_tablet(int64_t tablet_id,
-                                              SyncRowsetStats* sync_stats = nullptr) = 0;
+                                              SyncRowsetStats* sync_stats = nullptr,
+                                              bool force_use_cache = false) = 0;
 
     void register_report_listener(ReportWorker* listener);
     void deregister_report_listener(ReportWorker* listener);
@@ -146,6 +148,7 @@ public:
 protected:
     void _evict_querying_rowset();
     void _evict_quring_rowset_thread_callback();
+    bool _should_delay_large_task();
 
     int32_t _effective_cluster_id = -1;
     HeartbeatFlags* _heartbeat_flags = nullptr;
@@ -172,6 +175,11 @@ protected:
 
     std::shared_ptr<bvar::Status<size_t>> _tablet_max_delete_bitmap_score_metrics;
     std::shared_ptr<bvar::Status<size_t>> _tablet_max_base_rowset_delete_bitmap_score_metrics;
+
+    std::unique_ptr<ThreadPool> _base_compaction_thread_pool;
+    std::unique_ptr<ThreadPool> _cumu_compaction_thread_pool;
+    int _cumu_compaction_thread_pool_used_threads {0};
+    int _cumu_compaction_thread_pool_small_tasks_running {0};
 };
 
 class CompactionSubmitRegistry {
@@ -221,8 +229,8 @@ public:
 
     Status create_tablet(const TCreateTabletReq& request, RuntimeProfile* profile);
 
-    Result<BaseTabletSPtr> get_tablet(int64_t tablet_id,
-                                      SyncRowsetStats* sync_stats = nullptr) override;
+    Result<BaseTabletSPtr> get_tablet(int64_t tablet_id, SyncRowsetStats* sync_stats = nullptr,
+                                      bool force_use_cache = false) override;
 
     void clear_transaction_task(const TTransactionId transaction_id);
     void clear_transaction_task(const TTransactionId transaction_id,
@@ -298,6 +306,8 @@ public:
 
     bool get_peer_replica_info(int64_t tablet_id, TReplicaInfo* replica, std::string* token);
 
+    bool get_peers_replica_backends(int64_t tablet_id, std::vector<TBackend>* backends);
+
     bool should_fetch_from_peer(int64_t tablet_id);
 
     const std::shared_ptr<StreamLoadRecorder>& get_stream_load_recorder() {
@@ -327,6 +337,12 @@ public:
     bool remove_broken_path(std::string path);
 
     std::set<string> get_broken_paths() { return _broken_paths; }
+
+    Status submit_clone_task(Tablet* tablet, int64_t version);
+
+    std::unordered_map<int64_t, std::unique_ptr<TaskWorkerPoolIf>>* workers;
+
+    int64_t get_compaction_num_per_round() const { return _compaction_num_per_round; }
 
 private:
     // Instance should be inited from `static open()`
@@ -483,8 +499,6 @@ private:
     // Type of new loaded data
     RowsetTypePB _default_rowset_type;
 
-    std::unique_ptr<ThreadPool> _base_compaction_thread_pool;
-    std::unique_ptr<ThreadPool> _cumu_compaction_thread_pool;
     std::unique_ptr<ThreadPool> _single_replica_compaction_thread_pool;
 
     std::unique_ptr<ThreadPool> _seg_compaction_thread_pool;
@@ -529,6 +543,8 @@ private:
     std::mutex _cold_compaction_tablet_submitted_mtx;
     std::unordered_set<int64_t> _cold_compaction_tablet_submitted;
 
+    std::mutex _cumu_compaction_delay_mtx;
+
     // tablet_id, publish_version, transaction_id, partition_id
     std::map<int64_t, std::map<int64_t, std::pair<int64_t, int64_t>>> _async_publish_tasks;
     // aync publish for discontinuous versions of merge_on_write table
@@ -546,6 +562,10 @@ private:
 
     // thread to check tablet delete bitmap count tasks
     scoped_refptr<Thread> _check_delete_bitmap_score_thread;
+
+    int64_t _last_get_peers_replica_backends_time_ms {0};
+
+    int64_t _compaction_num_per_round {1};
 };
 
 // lru cache for create tabelt round robin in disks

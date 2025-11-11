@@ -33,6 +33,7 @@ import org.apache.doris.common.Config;
 import org.apache.doris.common.Pair;
 import org.apache.doris.common.util.Util;
 import org.apache.doris.datasource.ExternalTable;
+import org.apache.doris.datasource.ExternalView;
 import org.apache.doris.datasource.hive.HMSExternalTable;
 import org.apache.doris.datasource.hive.HMSExternalTable.DLAType;
 import org.apache.doris.nereids.CTEContext;
@@ -58,6 +59,7 @@ import org.apache.doris.nereids.trees.expressions.Expression;
 import org.apache.doris.nereids.trees.expressions.NamedExpression;
 import org.apache.doris.nereids.trees.expressions.Slot;
 import org.apache.doris.nereids.trees.expressions.SlotReference;
+import org.apache.doris.nereids.trees.expressions.StatementScopeIdGenerator;
 import org.apache.doris.nereids.trees.expressions.functions.AggCombinerFunctionBuilder;
 import org.apache.doris.nereids.trees.expressions.functions.FunctionBuilder;
 import org.apache.doris.nereids.trees.expressions.functions.agg.BitmapUnion;
@@ -95,6 +97,8 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 import org.apache.commons.collections.CollectionUtils;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -104,6 +108,7 @@ import java.util.Optional;
  * Rule to bind relations in query plan.
  */
 public class BindRelation extends OneAnalysisRuleFactory {
+    private static final Logger LOG = LogManager.getLogger(StatementContext.class);
 
     public BindRelation() {}
 
@@ -178,7 +183,8 @@ public class BindRelation extends OneAnalysisRuleFactory {
         return getLogicalPlan(table, unboundRelation, tableQualifier, cascadesContext);
     }
 
-    private LogicalPlan makeOlapScan(TableIf table, UnboundRelation unboundRelation, List<String> qualifier) {
+    private LogicalPlan makeOlapScan(TableIf table, UnboundRelation unboundRelation, List<String> qualifier,
+            CascadesContext cascadesContext) {
         LogicalOlapScan scan;
         List<Long> partIds = getPartitionIds(table, unboundRelation, qualifier);
         List<Long> tabletIds = unboundRelation.getTabletIds();
@@ -213,6 +219,9 @@ public class BindRelation extends OneAnalysisRuleFactory {
         if (!tabletIds.isEmpty()) {
             // This tabletIds is set manually, so need to set specifiedTabletIds
             scan = scan.withManuallySpecifiedTabletIds(tabletIds);
+        }
+        if (cascadesContext.getStatementContext().isHintForcePreAggOn()) {
+            return scan.withPreAggStatus(PreAggStatus.on());
         }
         if (needGenerateLogicalAggForRandomDistAggTable(scan)) {
             // it's a random distribution agg table
@@ -274,8 +283,8 @@ public class BindRelation extends OneAnalysisRuleFactory {
                 if (function == null) {
                     return olapScan;
                 }
-                Alias alias = new Alias(exprId, ImmutableList.of(function), col.getName(),
-                        olapScan.qualified(), true);
+                Alias alias = new Alias(StatementScopeIdGenerator.newExprId(), ImmutableList.of(function),
+                        col.getName(), olapScan.qualified(), true);
                 outputExpressions.add(alias);
             }
         }
@@ -380,7 +389,7 @@ public class BindRelation extends OneAnalysisRuleFactory {
             switch (table.getType()) {
                 case OLAP:
                 case MATERIALIZED_VIEW:
-                    return makeOlapScan(table, unboundRelation, qualifierWithoutTableName);
+                    return makeOlapScan(table, unboundRelation, qualifierWithoutTableName, cascadesContext);
                 case VIEW:
                     View view = (View) table;
                     isView = true;
@@ -457,7 +466,8 @@ public class BindRelation extends OneAnalysisRuleFactory {
         ctx.changeDefaultCatalog(hiveCatalog);
         ctx.setDatabase(hiveDb);
         try {
-            return parseAndAnalyzeView(table, ddlSql, cascadesContext);
+            return new LogicalView<>(new ExternalView(table, ddlSql),
+                    parseAndAnalyzeView(table, ddlSql, cascadesContext));
         } finally {
             // restore catalog and db in connect context
             ctx.changeDefaultCatalog(previousCatalog);

@@ -22,6 +22,8 @@ package org.apache.doris.analysis;
 
 import org.apache.doris.catalog.PrimitiveType;
 import org.apache.doris.catalog.ScalarType;
+import org.apache.doris.catalog.TableIf;
+import org.apache.doris.catalog.TableIf.TableType;
 import org.apache.doris.catalog.Type;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.FormatOptions;
@@ -677,6 +679,12 @@ public class DateLiteral extends LiteralExpr {
         return "'" + getStringValue() + "'";
     }
 
+    @Override
+    public String toSqlImpl(boolean disableTableName, boolean needExternalSql, TableType tableType,
+            TableIf table) {
+        return "'" + getStringValue() + "'";
+    }
+
     private void fillPaddedValue(char[] buffer, int start, long value, int length) {
         int end = start + length;
         for (int i = end - 1; i >= start; i--) {
@@ -764,8 +772,8 @@ public class DateLiteral extends LiteralExpr {
     }
 
     @Override
-    public String getStringValueForArray(FormatOptions options) {
-        return options.getNestedStringWrapper() + getStringValue() + options.getNestedStringWrapper();
+    protected String getStringValueInComplexTypeForQuery(FormatOptions options) {
+        return options.getNestedStringWrapper() + getStringValueForQuery(options) + options.getNestedStringWrapper();
     }
 
     public void roundCeiling(int newScale) {

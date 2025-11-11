@@ -215,14 +215,20 @@ void DataTypeNumberSerDe<T>::read_column_from_arrow(IColumn& column,
                 const auto* raw_data = buffer->data() + concrete_array->value_offset(offset_i);
                 const auto raw_data_len = concrete_array->value_length(offset_i);
 
-                Int128 val = 0;
-                ReadBuffer rb(raw_data, raw_data_len);
-                if (!read_int_text_impl(val, rb)) {
-                    throw doris::Exception(ErrorCode::INVALID_ARGUMENT,
-                                           "parse number fail, string: '{}'",
-                                           std::string(rb.position(), rb.count()).c_str());
+                if (raw_data_len == 0) {
+                    col_data.emplace_back(Int128()); // Int128() is NULL
+                } else {
+                    Int128 val = 0;
+                    ReadBuffer rb(raw_data, raw_data_len);
+                    if (!read_int_text_impl(val, rb)) {
+                        throw doris::Exception(ErrorCode::INVALID_ARGUMENT,
+                                               "parse number fail, string: '{}'",
+                                               std::string(rb.position(), rb.count()).c_str());
+                    }
+                    col_data.emplace_back(val);
                 }
-                col_data.emplace_back(val);
+            } else {
+                col_data.emplace_back(Int128()); // Int128() is NULL
             }
         }
         return;
@@ -271,8 +277,15 @@ Status DataTypeNumberSerDe<T>::_write_column_to_mysql(const IColumn& column,
     int buf_ret = 0;
     auto& data = assert_cast<const ColumnType&>(column).get_data();
     const auto col_index = index_check_const(row_idx, col_const);
-    if constexpr (std::is_same_v<T, Int8> || std::is_same_v<T, UInt8>) {
+    if constexpr (std::is_same_v<T, Int8>) {
         buf_ret = result.push_tinyint(data[col_index]);
+    } else if constexpr (std::is_same_v<T, UInt8>) {
+        if (options.level > 0 && !options.is_bool_value_num) {
+            std::string bool_value = data[col_index] ? "true" : "false";
+            result.push_string(bool_value.c_str(), bool_value.size());
+        } else {
+            buf_ret = result.push_tinyint(data[col_index]);
+        }
     } else if constexpr (std::is_same_v<T, Int16> || std::is_same_v<T, UInt16>) {
         buf_ret = result.push_smallint(data[col_index]);
     } else if constexpr (std::is_same_v<T, Int32> || std::is_same_v<T, UInt32>) {
@@ -338,17 +351,40 @@ Status DataTypeNumberSerDe<T>::write_column_to_orc(const std::string& timezone,
 
     if constexpr (std::is_same_v<T, Int128>) { // largeint
         orc::StringVectorBatch* cur_batch = dynamic_cast<orc::StringVectorBatch*>(orc_col_batch);
-
-        INIT_MEMORY_FOR_ORC_WRITER()
-
+        // First pass: calculate total memory needed and collect serialized values
+        size_t total_size = 0;
         for (size_t row_id = start; row_id < end; row_id++) {
             if (cur_batch->notNull[row_id] == 1) {
                 std::string value_str = fmt::format("{}", col_data[row_id]);
                 size_t len = value_str.size();
-
-                REALLOC_MEMORY_FOR_ORC_WRITER()
-
-                strcpy(const_cast<char*>(bufferRef.data) + offset, value_str.c_str());
+                total_size += len;
+            }
+        }
+        // Allocate continues memory based on calculated size
+        char* ptr = (char*)malloc(total_size);
+        if (!ptr) {
+            return Status::InternalError(
+                    "malloc memory {} error when write variant column data to orc file.",
+                    total_size);
+        }
+        StringRef bufferRef;
+        bufferRef.data = ptr;
+        bufferRef.size = total_size;
+        buffer_list.emplace_back(bufferRef);
+        // Second pass: fill the data and update the batch
+        size_t offset = 0;
+        for (size_t row_id = start; row_id < end; row_id++) {
+            if (cur_batch->notNull[row_id] == 1) {
+                std::string value_str = fmt::format("{}", col_data[row_id]);
+                size_t len = value_str.size();
+                if (offset + len > total_size) {
+                    return Status::InternalError(
+                            "Buffer overflow when writing column data to ORC file. offset {} with "
+                            "len {} exceed total_size {} . ",
+                            offset, len, total_size);
+                }
+                // do not use strcpy here, because this buffer is not null-terminated
+                memcpy(const_cast<char*>(bufferRef.data) + offset, value_str.c_str(), len);
                 cur_batch->data[row_id] = const_cast<char*>(bufferRef.data) + offset;
                 cur_batch->length[row_id] = len;
                 offset += len;

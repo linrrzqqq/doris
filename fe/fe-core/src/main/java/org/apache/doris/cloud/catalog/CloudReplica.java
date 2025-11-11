@@ -26,6 +26,7 @@ import org.apache.doris.cloud.qe.ComputeGroupException;
 import org.apache.doris.cloud.system.CloudSystemInfoService;
 import org.apache.doris.common.Config;
 import org.apache.doris.common.DdlException;
+import org.apache.doris.common.Pair;
 import org.apache.doris.common.io.Text;
 import org.apache.doris.common.util.DebugPointUtil;
 import org.apache.doris.qe.ConnectContext;
@@ -71,7 +72,8 @@ public class CloudReplica extends Replica {
     private Map<String, List<Long>> memClusterToBackends = new ConcurrentHashMap<String, List<Long>>();
 
     // clusterId, secondaryBe, changeTimestamp
-    private Map<String, List<Long>> secondaryClusterToBackends = new ConcurrentHashMap<String, List<Long>>();
+    private Map<String, Pair<Long, Long>> secondaryClusterToBackends
+            = new ConcurrentHashMap<String, Pair<Long, Long>>();
 
     public CloudReplica() {
     }
@@ -162,12 +164,15 @@ public class CloudReplica extends Replica {
 
     public long getBackendId(String beEndpoint) {
         String clusterName = ((CloudSystemInfoService) Env.getCurrentSystemInfo()).getClusterNameByBeAddr(beEndpoint);
+        String physicalClusterName = ((CloudSystemInfoService) Env.getCurrentSystemInfo())
+                .getPhysicalCluster(clusterName);
+
         try {
-            String clusterId = getCloudClusterIdByName(clusterName);
+            String clusterId = getCloudClusterIdByName(physicalClusterName);
             return getBackendIdImpl(clusterId);
         } catch (ComputeGroupException e) {
             if (LOG.isDebugEnabled()) {
-                LOG.debug("failed to get compute group name {}", clusterName, e);
+                LOG.debug("failed to get compute group name {}", physicalClusterName, e);
             }
             return -1;
         }
@@ -211,7 +216,8 @@ public class CloudReplica extends Replica {
         ConnectContext context = ConnectContext.get();
         if (context != null) {
             if (!Strings.isNullOrEmpty(context.getSessionVariable().getCloudCluster())) {
-                cluster = context.getSessionVariable().getCloudCluster();
+                cluster = ((CloudSystemInfoService) Env.getCurrentSystemInfo())
+                    .getPhysicalCluster(context.getSessionVariable().getCloudCluster());
                 try {
                     ((CloudEnv) Env.getCurrentEnv()).checkCloudClusterPriv(cluster);
                 } catch (Exception e) {
@@ -224,7 +230,8 @@ public class CloudReplica extends Replica {
                     LOG.debug("get compute group by session context compute group: {}", cluster);
                 }
             } else {
-                cluster = context.getCloudCluster(false);
+                cluster = ((CloudSystemInfoService) Env.getCurrentSystemInfo())
+                    .getPhysicalCluster(context.getCloudCluster(false));
                 if (LOG.isDebugEnabled()) {
                     LOG.debug("get compute group by context {}", cluster);
                 }
@@ -369,13 +376,17 @@ public class CloudReplica extends Replica {
     }
 
     public Backend getSecondaryBackend(String clusterId) {
-        List<Long> backendIds = secondaryClusterToBackends.get(clusterId);
-        if (backendIds == null || backendIds.isEmpty()) {
+        Pair<Long, Long> secondBeAndChangeTimestamp = secondaryClusterToBackends.get(clusterId);
+        if (secondBeAndChangeTimestamp == null) {
             return null;
         }
-
-        long backendId = backendIds.get(0);
-        return Env.getCurrentSystemInfo().getBackend(backendId);
+        long beId = secondBeAndChangeTimestamp.key();
+        long changeTimestamp = secondBeAndChangeTimestamp.value();
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("in secondaryClusterToBackends clusterId {}, beId {}, changeTimestamp {}, replica info {}",
+                    clusterId, beId, changeTimestamp, this);
+        }
+        return Env.getCurrentSystemInfo().getBackend(secondBeAndChangeTimestamp.first);
     }
 
     public long hashReplicaToBe(String clusterId, boolean isBackGround) throws ComputeGroupException {
@@ -583,11 +594,51 @@ public class CloudReplica extends Replica {
     }
 
     private void updateClusterToSecondaryBe(String cluster, long beId) {
-        secondaryClusterToBackends.put(cluster, Lists.newArrayList(beId));
+        long changeTimestamp = System.currentTimeMillis();
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("add to secondary clusterId {}, beId {}, changeTimestamp {}, replica info {}",
+                    cluster, beId, changeTimestamp, this);
+        }
+        secondaryClusterToBackends.put(cluster, Pair.of(beId, changeTimestamp));
     }
 
     public void clearClusterToBe(String cluster) {
         primaryClusterToBackends.remove(cluster);
         secondaryClusterToBackends.remove(cluster);
+    }
+
+    public List<Backend> getAllPrimaryBes() {
+        List<Backend> result = new ArrayList<Backend>();
+        primaryClusterToBackends.keySet().forEach(clusterId -> {
+            List<Long> backendIds = primaryClusterToBackends.get(clusterId);
+            if (backendIds == null || backendIds.isEmpty()) {
+                return;
+            }
+            Long beId = backendIds.get(0);
+            if (beId != -1) {
+                Backend backend = Env.getCurrentSystemInfo().getBackend(beId);
+                result.add(backend);
+            }
+        });
+        return result;
+    }
+
+    // ATTN: This func is only used by redundant tablet report clean in bes.
+    // Only the master node will do the diff logic,
+    // so just only need to clean up secondaryClusterToBackends on the master node.
+    public void checkAndClearSecondaryClusterToBe(String clusterId, long expireTimestamp) {
+        Pair<Long, Long> secondBeAndChangeTimestamp = secondaryClusterToBackends.get(clusterId);
+        if (secondBeAndChangeTimestamp == null) {
+            return;
+        }
+        long beId = secondBeAndChangeTimestamp.key();
+        long changeTimestamp = secondBeAndChangeTimestamp.value();
+
+        if (changeTimestamp < expireTimestamp) {
+            LOG.debug("remove clusterId {} secondary beId {} changeTimestamp {} expireTimestamp {} replica info {}",
+                    clusterId, beId, changeTimestamp, expireTimestamp, this);
+            secondaryClusterToBackends.remove(clusterId);
+            return;
+        }
     }
 }

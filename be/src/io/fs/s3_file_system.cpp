@@ -86,8 +86,7 @@ Status ObjClientHolder::reset(const S3ClientConf& conf) {
     S3ClientConf reset_conf;
     {
         std::shared_lock lock(_mtx);
-        if (conf.ak == _conf.ak && conf.sk == _conf.sk && conf.token == _conf.token &&
-            conf.use_virtual_addressing == _conf.use_virtual_addressing) {
+        if (conf.get_hash() == _conf.get_hash()) {
             return Status::OK(); // Same conf
         }
 
@@ -96,7 +95,14 @@ Status ObjClientHolder::reset(const S3ClientConf& conf) {
         reset_conf.sk = conf.sk;
         reset_conf.token = conf.token;
         reset_conf.bucket = conf.bucket;
+        reset_conf.connect_timeout_ms = conf.connect_timeout_ms;
+        reset_conf.max_connections = conf.max_connections;
+        reset_conf.request_timeout_ms = conf.request_timeout_ms;
         reset_conf.use_virtual_addressing = conf.use_virtual_addressing;
+
+        reset_conf.role_arn = conf.role_arn;
+        reset_conf.external_id = conf.external_id;
+        reset_conf.cred_provider_type = conf.cred_provider_type;
         // Should check endpoint here?
     }
 
@@ -262,6 +268,8 @@ Status S3FileSystem::exists_impl(const Path& path, bool* res) const {
     auto client = _client->get();
     CHECK_S3_CLIENT(client);
     auto key = DORIS_TRY(get_key(path));
+
+    VLOG_DEBUG << "key:" << key << " path:" << path;
 
     auto resp = client->head_object({.bucket = _bucket, .key = key});
 

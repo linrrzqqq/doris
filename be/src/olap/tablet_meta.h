@@ -241,7 +241,8 @@ public:
     static void init_column_from_tcolumn(uint32_t unique_id, const TColumn& tcolumn,
                                          ColumnPB* column);
 
-    DeleteBitmap& delete_bitmap() { return *_delete_bitmap; }
+    std::shared_ptr<DeleteBitmap> delete_bitmap() { return _delete_bitmap; }
+    void remove_rowset_delete_bitmap(const RowsetId& rowset_id, const Version& version);
 
     bool enable_unique_key_merge_on_write() const { return _enable_unique_key_merge_on_write; }
 
@@ -363,6 +364,20 @@ private:
     mutable std::shared_mutex _meta_lock;
 };
 
+class DeleteBitmapAggCache : public LRUCachePolicy {
+public:
+    DeleteBitmapAggCache(size_t capacity);
+
+    static DeleteBitmapAggCache* instance();
+
+    static DeleteBitmapAggCache* create_instance(size_t capacity);
+
+    class Value : public LRUCacheValueBase {
+    public:
+        roaring::Roaring bitmap;
+    };
+};
+
 /**
  * Wraps multiple bitmaps for recording rows (row id) that are deleted or
  * overwritten. For now, it's only used when unique key merge-on-write property
@@ -384,7 +399,6 @@ private:
 class DeleteBitmap {
 public:
     mutable std::shared_mutex lock;
-    mutable std::shared_mutex stale_delete_bitmap_lock;
     using SegmentId = uint32_t;
     using Version = uint64_t;
     using BitmapKey = std::tuple<RowsetId, SegmentId, Version>;
@@ -413,8 +427,12 @@ public:
     /**
      * Move c-tor for making delete bitmap snapshot on read path
      */
-    DeleteBitmap(DeleteBitmap&& r);
-    DeleteBitmap& operator=(DeleteBitmap&& r);
+    DeleteBitmap(DeleteBitmap&& r) noexcept;
+    DeleteBitmap& operator=(DeleteBitmap&& r) noexcept;
+
+    static DeleteBitmap from_pb(const DeleteBitmapPB& pb, int64_t tablet_id);
+
+    DeleteBitmapPB to_pb();
 
     /**
      * Makes a snapshot of delete bitmap, read lock will be acquired in this
@@ -549,11 +567,6 @@ public:
 
     void remove_sentinel_marks();
 
-    void add_to_remove_queue(const std::string& version_str,
-                             const std::vector<std::tuple<int64_t, DeleteBitmap::BitmapKey,
-                                                          DeleteBitmap::BitmapKey>>& vector);
-    void remove_stale_delete_bitmap_from_queue(const std::vector<std::string>& vector);
-
     uint64_t get_delete_bitmap_count();
 
     bool has_calculated_for_multi_segments(const RowsetId& rowset_id) const;
@@ -563,49 +576,22 @@ public:
 
     void clear_rowset_cache_version();
 
-    std::set<RowsetId> get_rowset_cache_version();
+    std::set<std::string> get_rowset_cache_version();
 
-    class AggCachePolicy : public LRUCachePolicy {
-    public:
-        AggCachePolicy(size_t capacity)
-                : LRUCachePolicy(CachePolicy::CacheType::DELETE_BITMAP_AGG_CACHE, capacity,
-                                 LRUCacheType::SIZE,
-                                 config::delete_bitmap_agg_cache_stale_sweep_time_sec, 256) {}
-    };
-
-    class AggCache {
-    public:
-        class Value : public LRUCacheValueBase {
-        public:
-            roaring::Roaring bitmap;
-        };
-
-        AggCache(size_t size_in_bytes) {
-            static std::once_flag once;
-            std::call_once(once, [size_in_bytes] {
-                auto* tmp = new AggCachePolicy(size_in_bytes);
-                AggCache::s_repr.store(tmp, std::memory_order_release);
-            });
-
-            while (!s_repr.load(std::memory_order_acquire)) {
-            }
-        }
-
-        static LRUCachePolicy* repr() { return s_repr.load(std::memory_order_acquire); }
-        static std::atomic<AggCachePolicy*> s_repr;
-    };
+    /**
+     * Calculate diffset with given `key_set`. All entries with keys contained in this delete bitmap but not
+     * in given key_set will be added to the output delete bitmap.
+     *
+     * @return Deletebitmap containning all entries in diffset
+    */
+    DeleteBitmap diffset(const std::set<BitmapKey>& key_set) const;
 
 private:
     DeleteBitmap::Version _get_rowset_cache_version(const BitmapKey& bmk) const;
 
-    mutable std::shared_ptr<AggCache> _agg_cache;
     int64_t _tablet_id;
     mutable std::shared_mutex _rowset_cache_version_lock;
     mutable std::map<RowsetId, std::map<SegmentId, Version>> _rowset_cache_version;
-    // <version, <tablet_id, BitmapKeyStart, BitmapKeyEnd>>
-    std::map<std::string,
-             std::vector<std::tuple<int64_t, DeleteBitmap::BitmapKey, DeleteBitmap::BitmapKey>>>
-            _stale_delete_bitmap;
 };
 
 static const std::string SEQUENCE_COL = "__DORIS_SEQUENCE_COL__";

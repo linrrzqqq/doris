@@ -111,7 +111,7 @@ public class MaterializedIndexMeta implements Writable, GsonPostProcessable {
     public void setWhereClause(Expr whereClause) {
         this.whereClause = whereClause;
         if (this.whereClause != null) {
-            this.whereClause.setDisableTableName(true);
+            this.whereClause.disableTableName();
         }
     }
 
@@ -173,6 +173,12 @@ public class MaterializedIndexMeta implements Writable, GsonPostProcessable {
     public void setSchema(List<Column> newSchema) throws IOException {
         this.schema = newSchema;
         parseStmt(null);
+        initColumnNameMap();
+    }
+
+    public void setSchema(List<Column> newSchema, Analyzer analyzer) throws IOException {
+        this.schema = newSchema;
+        parseStmt(analyzer);
         initColumnNameMap();
     }
 

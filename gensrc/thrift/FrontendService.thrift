@@ -597,6 +597,8 @@ struct TMasterOpRequest {
     // transaction load
     29: optional TTxnLoadInfo txnLoadInfo
     30: optional TGroupCommitInfo groupCommitInfo
+    31: optional binary prepareExecuteBuffer
+    32: optional bool moreResultExists // Server has more result to send
 
     // selectdb cloud
     1000: optional string cloud_cluster
@@ -631,6 +633,7 @@ struct TMasterOpResult {
     // transaction load
     9: optional TTxnLoadInfo txnLoadInfo;
     10: optional i64 groupCommitLoadBeId;
+    11: optional i64 affectedRows;
 }
 
 struct TUpdateExportTaskStatusRequest {
@@ -1197,6 +1200,7 @@ struct TGetBinlogRequest {
     8: optional string token
     9: optional i64 prev_commit_seq
     10: optional i64 num_acquired // the max num of binlogs in a batch
+    11: optional bool allow_follower_read
 }
 
 enum TBinlogType {
@@ -1225,6 +1229,7 @@ enum TBinlogType {
   RENAME_PARTITION = 22,
   DROP_ROLLUP = 23,
   RECOVER_INFO = 24,
+  MODIFY_DISTRIBUTION_BUCKET_NUM = 25
 
   // Keep some IDs for allocation so that when new binlog types are added in the
   // future, the changes can be picked back to the old versions without breaking
@@ -1241,8 +1246,7 @@ enum TBinlogType {
   //    MODIFY_XXX = 17,
   //    MIN_UNKNOWN = 18,
   //    UNKNOWN_3 = 19,
-  MIN_UNKNOWN = 25,
-  UNKNOWN_10 = 26,
+  MIN_UNKNOWN = 26,
   UNKNOWN_11 = 27,
   UNKNOWN_12 = 28,
   UNKNOWN_13 = 29,
@@ -1358,6 +1362,7 @@ struct TGetBinlogResult {
 
 struct TGetTabletReplicaInfosRequest {
     1: required list<i64> tablet_ids
+    2: optional i64 warm_up_job_id
 }
 
 struct TGetTabletReplicaInfosResult {

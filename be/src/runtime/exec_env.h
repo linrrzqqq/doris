@@ -115,6 +115,7 @@ class HeapProfiler;
 class WalManager;
 class DNSCache;
 struct SyncRowsetStats;
+class DeleteBitmapAggCache;
 
 inline bool k_doris_exit = false;
 
@@ -148,7 +149,8 @@ public:
 
     // Requires ExenEnv ready
     static Result<BaseTabletSPtr> get_tablet(int64_t tablet_id,
-                                             SyncRowsetStats* sync_stats = nullptr);
+                                             SyncRowsetStats* sync_stats = nullptr,
+                                             bool force_use_cache = false);
 
     static bool ready() { return _s_ready.load(std::memory_order_acquire); }
     static bool tracking_memory() { return _s_tracking_memory.load(std::memory_order_acquire); }
@@ -214,6 +216,7 @@ public:
         return _subcolumns_tree_tracker;
     }
     std::shared_ptr<MemTrackerLimiter> s3_file_buffer_tracker() { return _s3_file_buffer_tracker; }
+    std::shared_ptr<MemTrackerLimiter> parquet_meta_tracker() { return _parquet_meta_tracker; }
 
     ThreadPool* send_batch_thread_pool() { return _send_batch_thread_pool.get(); }
     ThreadPool* buffered_reader_prefetch_thread_pool() {
@@ -288,6 +291,7 @@ public:
     void set_cache_manager(CacheManager* cm) { this->_cache_manager = cm; }
     void set_process_profile(ProcessProfile* pp) { this->_process_profile = pp; }
     void set_tablet_schema_cache(TabletSchemaCache* c) { this->_tablet_schema_cache = c; }
+    void set_delete_bitmap_agg_cache(DeleteBitmapAggCache* c) { _delete_bitmap_agg_cache = c; }
     void set_tablet_column_object_pool(TabletColumnObjectPool* c) {
         this->_tablet_column_object_pool = c;
     }
@@ -354,6 +358,8 @@ public:
 
     bool check_auth_token(const std::string& auth_token);
 
+    DeleteBitmapAggCache* delete_bitmap_agg_cache() { return _delete_bitmap_agg_cache; }
+
 private:
     ExecEnv();
 
@@ -408,6 +414,9 @@ private:
     std::shared_ptr<MemTrackerLimiter> _rowid_storage_reader_tracker;
     std::shared_ptr<MemTrackerLimiter> _subcolumns_tree_tracker;
     std::shared_ptr<MemTrackerLimiter> _s3_file_buffer_tracker;
+
+    // Tracking memory consumption of parquet meta
+    std::shared_ptr<MemTrackerLimiter> _parquet_meta_tracker;
 
     std::unique_ptr<ThreadPool> _send_batch_thread_pool;
     // Threadpool used to prefetch remote file for buffered reader
@@ -480,6 +489,7 @@ private:
     QueryCache* _query_cache = nullptr;
     std::shared_ptr<DummyLRUCache> _dummy_lru_cache = nullptr;
     std::unique_ptr<io::FDCache> _file_cache_open_fd_cache;
+    DeleteBitmapAggCache* _delete_bitmap_agg_cache {nullptr};
 
     pipeline::RuntimeFilterTimerQueue* _runtime_filter_timer_queue = nullptr;
 

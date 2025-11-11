@@ -222,7 +222,8 @@ public:
      * number_filters(4) | length(4) | column_name | op(4) | scale(4) | num_values(4) | value_length(4) | value | ...
      * Then, pass the byte array address in configuration map, like "push_down_predicates=${address}"
      */
-    Status init(std::unordered_map<std::string, ColumnValueRangeType>* colname_to_value_range);
+    Status init(
+            const std::unordered_map<std::string, ColumnValueRangeType>* colname_to_value_range);
 
     /**
      * Call java side function JniScanner.getNextBatchMeta. The columns information are stored as long array:
@@ -240,7 +241,7 @@ public:
     /**
      * Get performance metrics from java scanner
      */
-    std::map<std::string, std::string> get_statistics(JNIEnv* env);
+    Status get_statistics(JNIEnv* env, std::map<std::string, std::string>* result);
 
     /**
      * Call java side function JniScanner.getTableSchema.
@@ -295,15 +296,15 @@ private:
 
     bool _closed = false;
     bool _scanner_opened = false;
-    jclass _jni_scanner_cls;
-    jobject _jni_scanner_obj;
-    jmethodID _jni_scanner_open;
-    jmethodID _jni_scanner_get_next_batch;
-    jmethodID _jni_scanner_get_table_schema;
-    jmethodID _jni_scanner_close;
-    jmethodID _jni_scanner_release_column;
-    jmethodID _jni_scanner_release_table;
-    jmethodID _jni_scanner_get_statistics;
+    jclass _jni_scanner_cls = nullptr;
+    jobject _jni_scanner_obj = nullptr;
+    jmethodID _jni_scanner_open = nullptr;
+    jmethodID _jni_scanner_get_next_batch = nullptr;
+    jmethodID _jni_scanner_get_table_schema = nullptr;
+    jmethodID _jni_scanner_close = nullptr;
+    jmethodID _jni_scanner_release_column = nullptr;
+    jmethodID _jni_scanner_release_table = nullptr;
+    jmethodID _jni_scanner_get_statistics = nullptr;
 
     TableMetaAddress _table_meta;
 
@@ -353,7 +354,7 @@ private:
     }
 
     void _generate_predicates(
-            std::unordered_map<std::string, ColumnValueRangeType>* colname_to_value_range);
+            const std::unordered_map<std::string, ColumnValueRangeType>* colname_to_value_range);
 
     template <PrimitiveType primitive_type>
     void _parse_value_range(const ColumnValueRange<primitive_type>& col_val_range,

@@ -17,6 +17,8 @@
 
 #pragma once
 
+#include <gen_cpp/olap_common.pb.h>
+
 #include <memory>
 #include <shared_mutex>
 #include <string>
@@ -40,6 +42,9 @@ class SegmentCacheHandle;
 class RowIdConversion;
 struct PartialUpdateInfo;
 class PartialUpdateReadPlan;
+struct CaptureRowsetOps;
+struct CaptureRowsetResult;
+struct TabletReadSource;
 
 struct TabletWithVersion {
     BaseTabletSPtr tablet;
@@ -63,10 +68,12 @@ public:
     int64_t partition_id() const { return _tablet_meta->partition_id(); }
     int64_t tablet_id() const { return _tablet_meta->tablet_id(); }
     int32_t schema_hash() const { return _tablet_meta->schema_hash(); }
+    size_t row_size() const { return _tablet_meta->tablet_schema()->row_size(); }
     KeysType keys_type() const { return _tablet_meta->tablet_schema()->keys_type(); }
     size_t num_key_columns() const { return _tablet_meta->tablet_schema()->num_key_columns(); }
     int64_t ttl_seconds() const { return _tablet_meta->ttl_seconds(); }
     std::mutex& get_schema_change_lock() { return _schema_change_lock; }
+    CompressKind compress_kind() const { return _tablet_meta->tablet_schema()->compress_kind(); }
     bool enable_unique_key_merge_on_write() const {
 #ifdef BE_TEST
         if (_tablet_meta == nullptr) {
@@ -78,6 +85,8 @@ public:
 
     // Property encapsulated in TabletMeta
     const TabletMetaSharedPtr& tablet_meta() { return _tablet_meta; }
+
+    int32 max_version_config();
 
     // FIXME(plat1ko): It is not appropriate to expose this lock
     std::shared_mutex& get_header_lock() { return _meta_lock; }
@@ -91,13 +100,15 @@ public:
         return _max_version_schema;
     }
 
+    void set_alter_failed(bool alter_failed) { _alter_failed = alter_failed; }
+    bool is_alter_failed() { return _alter_failed; }
+
+    virtual std::string tablet_path() const = 0;
+
     virtual bool exceed_version_limit(int32_t limit) = 0;
 
     virtual Result<std::unique_ptr<RowsetWriter>> create_rowset_writer(RowsetWriterContext& context,
                                                                        bool vertical) = 0;
-
-    virtual Status capture_consistent_rowsets_unlocked(
-            const Version& spec_version, std::vector<RowsetSharedPtr>* rowsets) const = 0;
 
     virtual Status capture_rs_readers(const Version& spec_version,
                                       std::vector<RowSetSplits>* rs_splits,
@@ -145,7 +156,6 @@ public:
                            RowsetSharedPtr rowset, const TupleDescriptor* desc,
                            OlapReaderStatistics& stats, std::string& values,
                            bool write_to_cache = false);
-
     // Lookup the row location of `encoded_key`, the function sets `row_location` on success.
     // NOTE: the method only works in unique key model with primary key index, you will got a
     //       not supported error in other data model.
@@ -176,7 +186,8 @@ public:
                                       RowsetWriter* rowset_writer);
 
     Status calc_delete_bitmap_between_segments(
-            RowsetSharedPtr rowset, const std::vector<segment_v2::SegmentSharedPtr>& segments,
+            TabletSchemaSPtr schema, const RowsetId& rowset_id,
+            const std::vector<segment_v2::SegmentSharedPtr>& segments,
             DeleteBitmapPtr delete_bitmap);
 
     static Status commit_phase_update_delete_bitmap(
@@ -299,6 +310,20 @@ public:
         return Status::OK();
     }
 
+    [[nodiscard]] Result<CaptureRowsetResult> capture_consistent_rowsets_unlocked(
+            const Version& version_range, const CaptureRowsetOps& options) const;
+
+    [[nodiscard]] Result<std::vector<Version>> capture_consistent_versions_unlocked(
+            const Version& version_range, const CaptureRowsetOps& options) const;
+
+    [[nodiscard]] Result<std::vector<RowSetSplits>> capture_rs_readers_unlocked(
+            const Version& version_range, const CaptureRowsetOps& options) const;
+
+    [[nodiscard]] Result<TabletReadSource> capture_read_source(const Version& version_range,
+                                                               const CaptureRowsetOps& options);
+
+    Result<CaptureRowsetResult> _remote_capture_rowsets(const Version& version_range) const;
+
 protected:
     // Find the missed versions until the spec_version.
     //
@@ -316,9 +341,6 @@ protected:
                                        const RowsetIdUnorderedSet& pre,
                                        RowsetIdUnorderedSet* to_add, RowsetIdUnorderedSet* to_del);
 
-    Status _capture_consistent_rowsets_unlocked(const std::vector<Version>& version_path,
-                                                std::vector<RowsetSharedPtr>* rowsets) const;
-
     Status sort_block(vectorized::Block& in_block, vectorized::Block& output_block);
 
     mutable std::shared_mutex _meta_lock;
@@ -332,6 +354,9 @@ protected:
     std::unordered_map<Version, RowsetSharedPtr, HashOfVersion> _stale_rs_version_map;
     const TabletMetaSharedPtr _tablet_meta;
     TabletSchemaSPtr _max_version_schema;
+
+    // `_alter_failed` is used to indicate whether the tablet failed to perform a schema change
+    std::atomic<bool> _alter_failed = false;
 
     // metrics of this tablet
     std::shared_ptr<MetricEntity> _metric_entity;
@@ -354,6 +379,26 @@ public:
     std::mutex sample_info_lock;
     std::vector<CompactionSampleInfo> sample_infos;
     Status last_compaction_status = Status::OK();
+};
+
+struct CaptureRowsetOps {
+    bool skip_missing_versions = false;
+    bool quiet = false;
+    bool include_stale_rowsets = true;
+    bool enable_fetch_rowsets_from_peers = false;
+};
+
+struct CaptureRowsetResult {
+    std::vector<RowsetSharedPtr> rowsets;
+    std::shared_ptr<DeleteBitmap> delete_bitmap;
+};
+
+struct TabletReadSource {
+    std::vector<RowSetSplits> rs_splits;
+    std::vector<RowsetMetaSharedPtr> delete_predicates;
+    std::shared_ptr<DeleteBitmap> delete_bitmap;
+    // Fill delete predicates with `rs_splits`
+    void fill_delete_predicates();
 };
 
 } /* namespace doris */

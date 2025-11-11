@@ -239,6 +239,8 @@ public class BindSink implements AnalysisRuleFactory {
 
         // add cast project
         List<NamedExpression> castExprs = Lists.newArrayList();
+        ConnectContext connCtx = ConnectContext.get();
+        final boolean truncateString = connCtx == null || connCtx.getSessionVariable().enableInsertValueAutoCast;
         for (int i = 0; i < tableSchema.size(); ++i) {
             Column col = tableSchema.get(i);
             NamedExpression expr = columnToOutput.get(col.getName());
@@ -248,6 +250,7 @@ public class BindSink implements AnalysisRuleFactory {
                 // we skip it.
                 continue;
             }
+            expr = expr.toSlot();
             DataType inputType = expr.getDataType();
             DataType targetType = DataType.fromCatalogType(tableSchema.get(i).getType());
             Expression castExpr = expr;
@@ -257,7 +260,7 @@ public class BindSink implements AnalysisRuleFactory {
                 int targetLength = ((CharacterType) targetType).getLen();
                 if (sourceLength == targetLength) {
                     castExpr = TypeCoercionUtils.castIfNotSameType(castExpr, targetType);
-                } else if (sourceLength > targetLength && targetLength >= 0) {
+                } else if (truncateString && sourceLength > targetLength && targetLength >= 0) {
                     castExpr = new Substring(castExpr, Literal.of(1), Literal.of(targetLength));
                 } else if (targetType.isStringType()) {
                     castExpr = new Cast(castExpr, StringType.INSTANCE);

@@ -47,10 +47,11 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 import java.util.zip.ZipOutputStream;
@@ -111,7 +112,7 @@ public class Profile {
 
     private PhysicalPlan physicalPlan;
     public Map<String, Long> rowsProducedMap = new HashMap<>();
-    private List<PhysicalRelation> physicalRelations = new ArrayList<>();
+    private Set<PhysicalRelation> physicalRelations = new LinkedHashSet<>();
 
     private String changedSessionVarCache = "";
 
@@ -448,22 +449,35 @@ public class Profile {
             return false;
         }
 
-        long currentTimeMillis = System.currentTimeMillis();
-        if (this.queryFinishTimestamp != Long.MAX_VALUE
-                && (currentTimeMillis - this.queryFinishTimestamp)
-                > Config.profile_waiting_time_for_spill_seconds * 1000) {
-            LOG.warn("Profile {} should be stored to storage without waiting for incoming profile,"
-                    + " since it has been waiting for {} ms, current time {} query finished time: {}",
-                    getId(), currentTimeMillis - this.queryFinishTimestamp, currentTimeMillis,
-                    this.queryFinishTimestamp);
+        // below is the case where query has finished
+        boolean hasReportingProfile = false;
 
-            this.summaryProfile.setSystemMessage(
-                            "This profile is not complete, since its collection does not finish in time."
-                            + " Maybe increase profile_waiting_time_for_spill_secs in fe.conf current val: "
-                            + String.valueOf(Config.profile_waiting_time_for_spill_seconds));
-            return true;
+        for (ExecutionProfile executionProfile : executionProfiles) {
+            if (!executionProfile.isCompleted()) {
+                hasReportingProfile = true;
+                break;
+            }
         }
 
+        if (!hasReportingProfile) {
+            return true;
+        } else {
+            long currentTimeMillis = System.currentTimeMillis();
+            if (this.queryFinishTimestamp != Long.MAX_VALUE
+                    && (currentTimeMillis - this.queryFinishTimestamp)
+                    > Config.profile_waiting_time_for_spill_seconds * 1000) {
+                LOG.warn("Profile {} should be stored to storage without waiting for incoming profile,"
+                        + " since it has been waiting for {} ms, current time {} query finished time: {}",
+                        getId(), currentTimeMillis - this.queryFinishTimestamp, currentTimeMillis,
+                        this.queryFinishTimestamp);
+
+                this.summaryProfile.setSystemMessage(
+                                "This profile is not complete, since its collection does not finish in time."
+                                + " Maybe increase profile_waiting_time_for_spill_secs in fe.conf current val: "
+                                + String.valueOf(Config.profile_waiting_time_for_spill_seconds));
+                return true;
+            }
+        }
         // query finished, wait a while for reporting profile
         return false;
     }

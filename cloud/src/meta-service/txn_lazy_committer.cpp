@@ -20,11 +20,12 @@
 #include <chrono>
 
 #include "common/logging.h"
+#include "common/stats.h"
 #include "common/util.h"
 #include "cpp/sync_point.h"
-#include "meta-service/keys.h"
 #include "meta-service/meta_service_helper.h"
 #include "meta-service/meta_service_tablet_stats.h"
+#include "meta-store/keys.h"
 
 using namespace std::chrono;
 
@@ -33,7 +34,8 @@ namespace doris::cloud {
 void scan_tmp_rowset(
         const std::string& instance_id, int64_t txn_id, std::shared_ptr<TxnKv> txn_kv,
         MetaServiceCode& code, std::string& msg, int64_t* db_id,
-        std::vector<std::pair<std::string, doris::RowsetMetaCloudPB>>* tmp_rowsets_meta);
+        std::vector<std::pair<std::string, doris::RowsetMetaCloudPB>>* tmp_rowsets_meta,
+        KVStats* stats);
 
 void update_tablet_stats(const StatsTabletKeyInfo& info, const TabletStats& stats,
                          std::unique_ptr<Transaction>& txn, MetaServiceCode& code,
@@ -43,7 +45,7 @@ void convert_tmp_rowsets(
         const std::string& instance_id, int64_t txn_id, std::shared_ptr<TxnKv> txn_kv,
         MetaServiceCode& code, std::string& msg, int64_t db_id,
         std::vector<std::pair<std::string, doris::RowsetMetaCloudPB>>& tmp_rowsets_meta,
-        std::unordered_map<int64_t, TabletIndexPB>& tablet_ids) {
+        std::map<int64_t, TabletIndexPB>& tablet_ids) {
     std::stringstream ss;
     std::unique_ptr<Transaction> txn;
     TxnErrorCode err = txn_kv->create_txn(&txn);
@@ -119,6 +121,7 @@ void convert_tmp_rowsets(
                 LOG(WARNING) << msg;
                 return;
             }
+
             VersionPB version_pb;
             if (!version_pb.ParseFromString(ver_val)) {
                 code = MetaServiceCode::PROTOBUF_PARSE_ERR;
@@ -128,6 +131,17 @@ void convert_tmp_rowsets(
             }
             LOG(INFO) << "txn_id=" << txn_id << " key=" << hex(ver_key)
                       << " version_pb:" << version_pb.ShortDebugString();
+
+            if (version_pb.pending_txn_ids_size() == 0 || version_pb.pending_txn_ids(0) != txn_id) {
+                LOG(INFO) << "txn_id=" << txn_id << " partition_id=" << tmp_rowset_pb.partition_id()
+                          << " tmp_rowset_key=" << hex(tmp_rowset_key)
+                          << " version has already been converted."
+                          << " version_pb:" << version_pb.ShortDebugString();
+                TEST_SYNC_POINT_CALLBACK("convert_tmp_rowsets::already_been_converted",
+                                         &version_pb);
+                return;
+            }
+
             partition_versions.emplace(tmp_rowset_pb.partition_id(), version_pb);
             DCHECK_EQ(partition_versions.size(), 1) << partition_versions.size();
         }
@@ -277,6 +291,8 @@ void make_committed_txn_visible(const std::string& instance_id, int64_t db_id, i
         txn->put(recycle_key, recycle_val);
         LOG(INFO) << "put recycle_key=" << hex(recycle_key) << " txn_id=" << txn_id;
 
+        TEST_SYNC_POINT_RETURN_WITH_VOID("TxnLazyCommitTask::make_committed_txn_visible::commit",
+                                         &code);
         err = txn->commit();
         if (err != TxnErrorCode::TXN_OK) {
             code = cast_as<ErrCategory::COMMIT>(err);
@@ -308,12 +324,11 @@ void TxnLazyCommitTask::commit() {
             int64_t db_id;
             std::vector<std::pair<std::string, doris::RowsetMetaCloudPB>> all_tmp_rowset_metas;
             scan_tmp_rowset(instance_id_, txn_id_, txn_kv_, code_, msg_, &db_id,
-                            &all_tmp_rowset_metas);
+                            &all_tmp_rowset_metas, nullptr);
             if (code_ != MetaServiceCode::OK) {
                 LOG(WARNING) << "scan_tmp_rowset failed, txn_id=" << txn_id_ << " code=" << code_;
                 break;
             }
-
             VLOG_DEBUG << "txn_id=" << txn_id_
                        << " tmp_rowset_metas.size()=" << all_tmp_rowset_metas.size();
             if (all_tmp_rowset_metas.size() == 0) {
@@ -321,26 +336,34 @@ void TxnLazyCommitTask::commit() {
             }
 
             // <partition_id, tmp_rowsets>
-            std::unordered_map<int64_t,
-                               std::vector<std::pair<std::string, doris::RowsetMetaCloudPB>>>
+            std::map<int64_t, std::vector<std::pair<std::string, doris::RowsetMetaCloudPB>>>
                     partition_to_tmp_rowset_metas;
+            size_t max_rowset_meta_size = 0;
             for (auto& [tmp_rowset_key, tmp_rowset_pb] : all_tmp_rowset_metas) {
                 partition_to_tmp_rowset_metas[tmp_rowset_pb.partition_id()].emplace_back();
                 partition_to_tmp_rowset_metas[tmp_rowset_pb.partition_id()].back().first =
                         tmp_rowset_key;
                 partition_to_tmp_rowset_metas[tmp_rowset_pb.partition_id()].back().second =
                         tmp_rowset_pb;
+                max_rowset_meta_size = std::max(max_rowset_meta_size, tmp_rowset_pb.ByteSizeLong());
             }
 
-            // tablet_id -> TabletIndexPB
-            std::unordered_map<int64_t, TabletIndexPB> tablet_ids;
+            // fdb txn limit 10MB, we use 4MB as the max size for each batch.
+            size_t max_rowsets_per_batch = config::txn_lazy_max_rowsets_per_batch;
+            if (max_rowset_meta_size > 0) {
+                max_rowsets_per_batch = std::min((4UL << 20) / max_rowset_meta_size,
+                                                 size_t(config::txn_lazy_max_rowsets_per_batch));
+                TEST_SYNC_POINT_CALLBACK("TxnLazyCommitTask::commit::max_rowsets_per_batch",
+                                         &max_rowsets_per_batch, &max_rowset_meta_size);
+            }
+
             for (auto& [partition_id, tmp_rowset_metas] : partition_to_tmp_rowset_metas) {
-                for (size_t i = 0; i < tmp_rowset_metas.size();
-                     i += config::txn_lazy_max_rowsets_per_batch) {
-                    size_t end =
-                            (i + config::txn_lazy_max_rowsets_per_batch) > tmp_rowset_metas.size()
-                                    ? tmp_rowset_metas.size()
-                                    : i + config::txn_lazy_max_rowsets_per_batch;
+                // tablet_id -> TabletIndexPB
+                std::map<int64_t, TabletIndexPB> tablet_ids;
+                for (size_t i = 0; i < tmp_rowset_metas.size(); i += max_rowsets_per_batch) {
+                    size_t end = (i + max_rowsets_per_batch) > tmp_rowset_metas.size()
+                                         ? tmp_rowset_metas.size()
+                                         : i + max_rowsets_per_batch;
                     std::vector<std::pair<std::string, doris::RowsetMetaCloudPB>>
                             sub_partition_tmp_rowset_metas(tmp_rowset_metas.begin() + i,
                                                            tmp_rowset_metas.begin() + end);
@@ -450,6 +473,7 @@ void TxnLazyCommitTask::commit() {
                                   << " txn_id=" << txn_id_;
                     }
 
+                    TEST_SYNC_POINT_CALLBACK("TxnLazyCommitter::commit");
                     err = txn->commit();
                     if (err != TxnErrorCode::TXN_OK) {
                         code_ = cast_as<ErrCategory::COMMIT>(err);
@@ -499,7 +523,8 @@ std::pair<MetaServiceCode, std::string> TxnLazyCommitTask::wait() {
 }
 
 TxnLazyCommitter::TxnLazyCommitter(std::shared_ptr<TxnKv> txn_kv) : txn_kv_(txn_kv) {
-    worker_pool_ = std::make_unique<SimpleThreadPool>(config::txn_lazy_commit_num_threads);
+    worker_pool_ = std::make_unique<SimpleThreadPool>(config::txn_lazy_commit_num_threads,
+                                                      "txn_lazy_commiter");
     worker_pool_->start();
 }
 

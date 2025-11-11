@@ -106,7 +106,7 @@ public:
     [[nodiscard]] int64_t watcher_elapse_time() { return _watcher.elapsed_time(); }
 
     // Which dependency current pipeline task is blocked by. `nullptr` if this dependency is ready.
-    [[nodiscard]] virtual Dependency* is_blocked_by(PipelineTask* task = nullptr);
+    [[nodiscard]] virtual Dependency* is_blocked_by(std::shared_ptr<PipelineTask> task = nullptr);
     // Notify downstream pipeline tasks this dependency is ready.
     void set_ready();
     void set_ready_to_read() {
@@ -151,7 +151,7 @@ public:
     }
 
 protected:
-    void _add_block_task(PipelineTask* task);
+    void _add_block_task(std::shared_ptr<PipelineTask> task);
 
     const int _id;
     const int _node_id;
@@ -162,7 +162,7 @@ protected:
     MonotonicStopWatch _watcher;
 
     std::mutex _task_lock;
-    std::vector<PipelineTask*> _blocked_task;
+    std::vector<std::weak_ptr<PipelineTask>> _blocked_task;
 
     // If `_always_ready` is true, `block()` will never block tasks.
     std::atomic<bool> _always_ready = false;
@@ -207,10 +207,11 @@ struct RuntimeFilterTimerQueue;
 class RuntimeFilterTimer {
 public:
     RuntimeFilterTimer(int64_t registration_time, int32_t wait_time_ms,
-                       std::shared_ptr<RuntimeFilterDependency> parent)
+                       std::shared_ptr<Dependency> parent, bool force_wait_timeout = false)
             : _parent(std::move(parent)),
               _registration_time(registration_time),
-              _wait_time_ms(wait_time_ms) {}
+              _wait_time_ms(wait_time_ms),
+              _force_wait_timeout(force_wait_timeout) {}
 
     // Called by runtime filter producer.
     void call_ready();
@@ -228,13 +229,17 @@ public:
 
     bool should_be_check_timeout();
 
+    bool force_wait_timeout() { return _force_wait_timeout; }
+
 private:
     friend struct RuntimeFilterTimerQueue;
-    std::shared_ptr<RuntimeFilterDependency> _parent = nullptr;
+    std::shared_ptr<Dependency> _parent = nullptr;
     std::vector<std::shared_ptr<RuntimeFilterDependency>> _local_runtime_filter_dependencies;
     std::mutex _lock;
     int64_t _registration_time;
     const int32_t _wait_time_ms;
+    // true only for group_commit_scan_operator
+    bool _force_wait_timeout;
 };
 
 struct RuntimeFilterTimerQueue {
@@ -277,7 +282,7 @@ public:
             : Dependency(id, node_id, name), _runtime_filter(runtime_filter) {}
     std::string debug_string(int indentation_level = 0) override;
 
-    Dependency* is_blocked_by(PipelineTask* task) override;
+    Dependency* is_blocked_by(std::shared_ptr<PipelineTask> task) override;
 
 private:
     const IRuntimeFilter* _runtime_filter = nullptr;

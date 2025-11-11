@@ -258,7 +258,9 @@ Status NewJsonReader::get_columns(std::unordered_map<std::string, TypeDescriptor
 Status NewJsonReader::get_parsed_schema(std::vector<std::string>* col_names,
                                         std::vector<TypeDescriptor>* col_types) {
     RETURN_IF_ERROR(_get_range_params());
-
+    // create decompressor.
+    // _decompressor may be nullptr if this is not a compressed file
+    RETURN_IF_ERROR(Decompressor::create_decompressor(_file_compress_type, &_decompressor));
     RETURN_IF_ERROR(_open_file_reader(true));
     if (_read_json_by_line) {
         RETURN_IF_ERROR(_open_line_reader());
@@ -401,6 +403,20 @@ Status NewJsonReader::_get_range_params() {
     if (_range.table_format_params.table_format_type == "hive") {
         _is_hive_table = true;
     }
+    if (_params.file_attributes.__isset.openx_json_ignore_malformed) {
+        _openx_json_ignore_malformed = _params.file_attributes.openx_json_ignore_malformed;
+    }
+    return Status::OK();
+}
+
+static Status ignore_malformed_json_append_null(Block& block) {
+    for (auto& column : block.get_columns()) {
+        if (!column->is_nullable()) [[unlikely]] {
+            return Status::DataQualityError("malformed json, but the column `{}` is not nullable.",
+                                            column->get_name());
+        }
+        static_cast<ColumnNullable*>(column->assume_mutable().get())->insert_default();
+    }
     return Status::OK();
 }
 
@@ -488,8 +504,13 @@ Status NewJsonReader::_vhandle_simple_json(RuntimeState* /*state*/, Block& block
         bool valid = false;
         if (_next_row >= _total_rows) { // parse json and generic document
             Status st = _parse_json(is_empty_row, eof);
-            if (_is_load && st.is<DATA_QUALITY_ERROR>()) {
-                continue; // continue to read next (for load, after this , already append error to file.)
+            if (st.is<DATA_QUALITY_ERROR>()) {
+                if (_is_load) {
+                    continue; // continue to read next (for load, after this , already append error to file.)
+                } else if (_openx_json_ignore_malformed) {
+                    RETURN_IF_ERROR(ignore_malformed_json_append_null(block));
+                    continue;
+                }
             }
             RETURN_IF_ERROR(st);
             if (*is_empty_row) {
@@ -1261,9 +1282,15 @@ Status NewJsonReader::_simdjson_handle_simple_json(RuntimeState* /*state*/, Bloc
 
         // step2: get json value by json doc
         Status st = _get_json_value(&size, eof, &error, is_empty_row);
-        if (_is_load && st.is<DATA_QUALITY_ERROR>()) {
-            return Status::OK();
+        if (st.is<DATA_QUALITY_ERROR>()) {
+            if (_is_load) {
+                return Status::OK();
+            } else if (_openx_json_ignore_malformed) {
+                RETURN_IF_ERROR(ignore_malformed_json_append_null(block));
+                return Status::OK();
+            }
         }
+
         RETURN_IF_ERROR(st);
         if (*is_empty_row || *eof) {
             return Status::OK();
@@ -1656,6 +1683,17 @@ Status NewJsonReader::_simdjson_write_data_to_column(simdjson::ondemand::value& 
             RETURN_IF_ERROR(data_serde->deserialize_one_cell_from_json(*data_column_ptr, slice,
                                                                        _serde_options));
 
+        } else if (value.type() == simdjson::ondemand::json_type::boolean) {
+            const char* str_value = nullptr;
+            // insert "1"/"0" , not "true"/"false".
+            if (value.get_bool()) {
+                str_value = (char*)"1";
+            } else {
+                str_value = (char*)"0";
+            }
+            Slice slice {str_value, 1};
+            RETURN_IF_ERROR(data_serde->deserialize_one_cell_from_json(*data_column_ptr, slice,
+                                                                       _serde_options));
         } else {
             // Maybe we can `switch (value->GetType()) case: kNumberType`.
             // Note that `if (value->IsInt())`, but column is FloatColumn.
@@ -1993,6 +2031,7 @@ Status NewJsonReader::_simdjson_write_columns_by_jsonpath(
             if (slot_desc->is_nullable()) {
                 nullable_column = assert_cast<ColumnNullable*>(column_ptr);
                 target_column_ptr = &nullable_column->get_nested_column();
+                nullable_column->get_null_map_data().push_back(0);
             }
             auto* column_string = assert_cast<ColumnString*>(target_column_ptr);
             column_string->insert_data(_simdjson_ondemand_padding_buffer.data(),

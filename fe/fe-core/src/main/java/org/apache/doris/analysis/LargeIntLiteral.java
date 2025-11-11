@@ -18,9 +18,10 @@
 package org.apache.doris.analysis;
 
 import org.apache.doris.catalog.PrimitiveType;
+import org.apache.doris.catalog.TableIf;
+import org.apache.doris.catalog.TableIf.TableType;
 import org.apache.doris.catalog.Type;
 import org.apache.doris.common.AnalysisException;
-import org.apache.doris.common.FormatOptions;
 import org.apache.doris.common.io.Text;
 import org.apache.doris.thrift.TExprNode;
 import org.apache.doris.thrift.TExprNodeType;
@@ -198,11 +199,6 @@ public class LargeIntLiteral extends NumericLiteralExpr {
     }
 
     @Override
-    public String getStringValueForArray(FormatOptions options) {
-        return options.getNestedStringWrapper() + getStringValue() + options.getNestedStringWrapper();
-    }
-
-    @Override
     public long getLongValue() {
         return value.longValue();
     }
@@ -214,6 +210,12 @@ public class LargeIntLiteral extends NumericLiteralExpr {
 
     @Override
     public String toSqlImpl() {
+        return getStringValue();
+    }
+
+    @Override
+    public String toSqlImpl(boolean disableTableName, boolean needExternalSql, TableType tableType,
+            TableIf table) {
         return getStringValue();
     }
 

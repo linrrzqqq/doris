@@ -102,6 +102,9 @@ protected:
     int64_t _input_row_num {0};
     int64_t _input_num_segments {0};
 
+    int64_t _local_read_bytes_total {};
+    int64_t _remote_read_bytes_total {};
+
     Merger::Statistics _stats;
 
     RowsetSharedPtr _output_rowset;
@@ -145,6 +148,10 @@ public:
     int64_t get_compaction_permits();
 
     int64_t initiator() const { return INVALID_COMPACTION_INITIATOR_ID; }
+
+    int64_t calc_input_rowsets_total_size() const;
+
+    int64_t calc_input_rowsets_row_num() const;
 
 protected:
     // Convert `_tablet` from `BaseTablet` to `Tablet`

@@ -21,6 +21,8 @@
 package org.apache.doris.analysis;
 
 import org.apache.doris.catalog.PrimitiveType;
+import org.apache.doris.catalog.TableIf;
+import org.apache.doris.catalog.TableIf.TableType;
 import org.apache.doris.catalog.Type;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.DdlException;
@@ -139,6 +141,12 @@ public class StringLiteral extends LiteralExpr {
     }
 
     @Override
+    public String toSqlImpl(boolean disableTableName, boolean needExternalSql, TableType tableType,
+            TableIf table) {
+        return "'" + value.replaceAll("'", "''") + "'";
+    }
+
+    @Override
     protected void toThrift(TExprNode msg) {
         if (value == null) {
             msg.node_type = TExprNodeType.NULL_LITERAL;
@@ -154,8 +162,8 @@ public class StringLiteral extends LiteralExpr {
     }
 
     @Override
-    public String getStringValueForArray(FormatOptions options) {
-        return options.getNestedStringWrapper() + getStringValue() + options.getNestedStringWrapper();
+    protected String getStringValueInComplexTypeForQuery(FormatOptions options) {
+        return options.getNestedStringWrapper() + getStringValueForQuery(options) + options.getNestedStringWrapper();
     }
 
     @Override

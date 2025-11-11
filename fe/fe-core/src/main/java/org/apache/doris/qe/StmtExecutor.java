@@ -24,7 +24,6 @@ import org.apache.doris.analysis.AnalyzeDBStmt;
 import org.apache.doris.analysis.AnalyzeStmt;
 import org.apache.doris.analysis.AnalyzeTblStmt;
 import org.apache.doris.analysis.Analyzer;
-import org.apache.doris.analysis.ArrayLiteral;
 import org.apache.doris.analysis.CreateRoutineLoadStmt;
 import org.apache.doris.analysis.CreateTableAsSelectStmt;
 import org.apache.doris.analysis.CreateTableLikeStmt;
@@ -43,7 +42,6 @@ import org.apache.doris.analysis.LoadStmt;
 import org.apache.doris.analysis.LoadType;
 import org.apache.doris.analysis.LockTablesStmt;
 import org.apache.doris.analysis.NativeInsertStmt;
-import org.apache.doris.analysis.NullLiteral;
 import org.apache.doris.analysis.OutFileClause;
 import org.apache.doris.analysis.PartitionNames;
 import org.apache.doris.analysis.PlaceHolderExpr;
@@ -147,6 +145,8 @@ import org.apache.doris.nereids.exceptions.ParseException;
 import org.apache.doris.nereids.glue.LogicalPlanAdapter;
 import org.apache.doris.nereids.minidump.MinidumpUtils;
 import org.apache.doris.nereids.parser.NereidsParser;
+import org.apache.doris.nereids.trees.expressions.Placeholder;
+import org.apache.doris.nereids.trees.expressions.literal.DateTimeV2Literal;
 import org.apache.doris.nereids.trees.plans.commands.Command;
 import org.apache.doris.nereids.trees.plans.commands.CreatePolicyCommand;
 import org.apache.doris.nereids.trees.plans.commands.CreateTableCommand;
@@ -224,6 +224,7 @@ import com.google.common.collect.Sets;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.ProtocolStringList;
 import lombok.Setter;
+import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -259,7 +260,6 @@ public class StmtExecutor {
 
     private static final AtomicLong STMT_ID_GENERATOR = new AtomicLong(0);
     public static final int MAX_DATA_TO_SEND_FOR_TXN = 100;
-    public static final String NULL_VALUE_FOR_LOAD = "\\N";
     private static Set<String> blockSqlAstNames = Sets.newHashSet();
 
     private Pattern beIpPattern = Pattern.compile("\\[(\\d+):");
@@ -281,12 +281,18 @@ public class StmtExecutor {
     private Data.PQueryStatistics.Builder statisticsForAuditLog;
     private boolean isCached;
     private String stmtName;
+    private String prepareStmtName; // for prox
     private String mysqlLoadId;
     // Handle selects that fe can do without be
     private boolean isHandleQueryInFe = false;
     // The profile of this execution
     private final Profile profile;
     private Boolean isForwardedToMaster = null;
+    // Flag for execute prepare statement, need to use binary protocol resultset
+    private boolean isComStmtExecute = false;
+    // Set to true if there are more stmt need to execute.
+    // Mainly for forward to master, so that master can set the mysql server status correctly.
+    private boolean moreStmtExists = false;
 
     // The result schema if "dry_run_query" is true.
     // Only one column to indicate the real return row numbers.
@@ -316,9 +322,14 @@ public class StmtExecutor {
 
     // constructor for receiving parsed stmt from connect processor
     public StmtExecutor(ConnectContext ctx, StatementBase parsedStmt) {
+        this(ctx, parsedStmt, false);
+    }
+
+    public StmtExecutor(ConnectContext ctx, StatementBase parsedStmt, boolean isComStmtExecute) {
         this.context = ctx;
         this.parsedStmt = parsedStmt;
         this.originStmt = parsedStmt.getOrigStmt();
+        this.isComStmtExecute = isComStmtExecute;
         if (context.getConnectType() == ConnectType.MYSQL) {
             this.serializer = context.getMysqlChannel().getSerializer();
         } else {
@@ -359,19 +370,7 @@ public class StmtExecutor {
                 throw new UserException(
                         "do not support non-literal expr in transactional insert operation: " + expr.toSql());
             }
-            if (expr instanceof NullLiteral) {
-                row.addColBuilder().setValue(NULL_VALUE_FOR_LOAD);
-            } else if (expr instanceof ArrayLiteral) {
-                row.addColBuilder().setValue("\"" + expr.getStringValueForStreamLoad(options) + "\"");
-            } else {
-                String stringValue = expr.getStringValueForStreamLoad(options);
-                if (stringValue.equals(NULL_VALUE_FOR_LOAD) || stringValue.startsWith("\"") || stringValue.endsWith(
-                        "\"")) {
-                    row.addColBuilder().setValue("\"" + stringValue + "\"");
-                } else {
-                    row.addColBuilder().setValue(stringValue);
-                }
-            }
+            row.addColBuilder().setValue(expr.getStringValueForStreamLoad(options));
         }
         return row.build();
     }
@@ -435,6 +434,14 @@ public class StmtExecutor {
             isForwardedToMaster = shouldForwardToMaster();
         }
         return isForwardedToMaster;
+    }
+
+    public boolean isMoreStmtExists() {
+        return moreStmtExists;
+    }
+
+    public void setMoreStmtExists(boolean moreStmtExists) {
+        this.moreStmtExists = moreStmtExists;
     }
 
     private boolean shouldForwardToMaster() {
@@ -715,8 +722,12 @@ public class StmtExecutor {
             }
             long stmtId = Config.prepared_stmt_start_id > 0
                     ? Config.prepared_stmt_start_id : context.getPreparedStmtId();
-            logicalPlan = new PrepareCommand(String.valueOf(stmtId),
-                    logicalPlan, statementContext.getPlaceholders(), originStmt);
+            this.prepareStmtName = String.valueOf(stmtId);
+            // When proxy executing, this.statementContext is created in constructor.
+            // But context.statementContext is created in LogicalPlanBuilder.
+            List<Placeholder> placeholders = context == null
+                    ? statementContext.getPlaceholders() : context.getStatementContext().getPlaceholders();
+            logicalPlan = new PrepareCommand(prepareStmtName, logicalPlan, placeholders, originStmt);
         }
         // when we in transaction mode, we only support insert into command and transaction command
         if (context.isTxnModel()) {
@@ -737,8 +748,7 @@ public class StmtExecutor {
                     if (logicalPlan instanceof InsertIntoTableCommand) {
                         profileType = ProfileType.LOAD;
                     }
-                    if (context.getCommand() == MysqlCommand.COM_STMT_PREPARE
-                            || context.getCommand() == MysqlCommand.COM_STMT_EXECUTE) {
+                    if (context.getCommand() == MysqlCommand.COM_STMT_PREPARE) {
                         throw new UserException("Forward master command is not supported for prepare statement");
                     }
                     if (isProxy) {
@@ -1234,6 +1244,7 @@ public class StmtExecutor {
         if (LOG.isDebugEnabled()) {
             LOG.debug("need to transfer to Master. stmt: {}", context.getStmtId());
         }
+        masterOpExecutor.setMoreStmtExists(moreStmtExists);
         masterOpExecutor.execute();
         if (parsedStmt instanceof SetStmt) {
             SetStmt setStmt = (SetStmt) parsedStmt;
@@ -2911,18 +2922,14 @@ public class StmtExecutor {
             sendMetaData(resultSet.getMetaData(), fieldInfos);
 
             // Send result set.
-            for (List<String> row : resultSet.getResultRows()) {
-                serializer.reset();
-                for (String item : row) {
-                    if (item == null || item.equals(FeConstants.null_string)) {
-                        serializer.writeNull();
-                    } else {
-                        serializer.writeLenEncodedString(item);
-                    }
+            if (isComStmtExecute) {
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("Use binary protocol to set result.");
                 }
-                context.getMysqlChannel().sendOnePacket(serializer.toByteBuffer());
+                sendBinaryResultRow(resultSet);
+            } else {
+                sendTextResultRow(resultSet);
             }
-
             context.getState().setEof();
         } else if (context.getConnectType().equals(ConnectType.ARROW_FLIGHT_SQL)) {
             context.updateReturnRows(resultSet.getResultRows().size());
@@ -2931,6 +2938,79 @@ public class StmtExecutor {
             context.getState().setEof();
         } else {
             LOG.error("sendResultSet error connect type");
+        }
+    }
+
+    protected void sendTextResultRow(ResultSet resultSet) throws IOException {
+        for (List<String> row : resultSet.getResultRows()) {
+            serializer.reset();
+            for (String item : row) {
+                if (item == null || item.equals(FeConstants.null_string)) {
+                    serializer.writeNull();
+                } else {
+                    serializer.writeLenEncodedString(item);
+                }
+            }
+            context.getMysqlChannel().sendOnePacket(serializer.toByteBuffer());
+        }
+    }
+
+    protected void sendBinaryResultRow(ResultSet resultSet) throws IOException {
+        // https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_binary_resultset.html#sect_protocol_binary_resultset_row_value
+        ResultSetMetaData metaData = resultSet.getMetaData();
+        int nullBitmapLength = (metaData.getColumnCount() + 7 + 2) / 8;
+        for (List<String> row : resultSet.getResultRows()) {
+            serializer.reset();
+            // Reserved one byte.
+            serializer.writeByte((byte) 0x00);
+            byte[] nullBitmap = new byte[nullBitmapLength];
+            // Generate null bitmap
+            for (int i = 0; i < row.size(); i++) {
+                String item = row.get(i);
+                if (item == null || item.equals(FeConstants.null_string)) {
+                    // The first 2 bits are reserved.
+                    int byteIndex = (i + 2) / 8;  // Index of the byte in the bitmap array
+                    int bitInByte = (i + 2) % 8;  // Position within the target byte (0-7)
+                    nullBitmap[byteIndex] |= (1 << bitInByte);
+                }
+            }
+            // Null bitmap
+            serializer.writeBytes(nullBitmap);
+            // Non-null columns
+            for (int i = 0; i < row.size(); i++) {
+                String item = row.get(i);
+                if (item != null && !item.equals(FeConstants.null_string)) {
+                    Column col = metaData.getColumn(i);
+                    switch (col.getType().getPrimitiveType()) {
+                        case INT:
+                            serializer.writeInt4(Integer.parseInt(item));
+                            break;
+                        case BIGINT:
+                            serializer.writeInt8(Long.parseLong(item));
+                            break;
+                        case DATETIME:
+                        case DATETIMEV2:
+                            DateTimeV2Literal datetime = new DateTimeV2Literal(item);
+                            long microSecond = datetime.getMicroSecond();
+                            // https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_com_query_response_text_resultset.html
+                            int length = microSecond == 0 ? 7 : 11;
+                            serializer.writeInt1(length);
+                            serializer.writeInt2((int) (datetime.getYear()));
+                            serializer.writeInt1((int) datetime.getMonth());
+                            serializer.writeInt1((int) datetime.getDay());
+                            serializer.writeInt1((int) datetime.getHour());
+                            serializer.writeInt1((int) datetime.getMinute());
+                            serializer.writeInt1((int) datetime.getSecond());
+                            if (microSecond > 0) {
+                                serializer.writeInt4((int) microSecond);
+                            }
+                            break;
+                        default:
+                            serializer.writeLenEncodedString(item);
+                    }
+                }
+            }
+            context.getMysqlChannel().sendOnePacket(serializer.toByteBuffer());
         }
     }
 
@@ -3418,6 +3498,9 @@ public class StmtExecutor {
         UUID uuid = UUID.randomUUID();
         TUniqueId queryId = new TUniqueId(uuid.getMostSignificantBits(), uuid.getLeastSignificantBits());
         context.setQueryId(queryId);
+        if (originStmt.originStmt != null) {
+            context.setSqlHash(DigestUtils.md5Hex(originStmt.originStmt));
+        }
         try {
             List<ResultRow> resultRows = new ArrayList<>();
             try {
@@ -3531,7 +3614,7 @@ public class StmtExecutor {
     }
 
     private HttpStreamParams generateHttpStreamNereidsPlan(TUniqueId queryId) {
-        LOG.info("TUniqueId: {} generate stream load plan", queryId);
+        LOG.info("TUniqueId: {} generate stream load plan", DebugUtil.printId(queryId));
         context.setQueryId(queryId);
         context.setStmtId(STMT_ID_GENERATOR.incrementAndGet());
 
@@ -3540,7 +3623,6 @@ public class StmtExecutor {
                 "Nereids only process LogicalPlanAdapter, but parsedStmt is " + parsedStmt.getClass().getName());
         context.getState().setNereids(true);
         InsertIntoTableCommand insert = (InsertIntoTableCommand) ((LogicalPlanAdapter) parsedStmt).getLogicalPlan();
-        HttpStreamParams httpStreamParams = new HttpStreamParams();
 
         try {
             if (!StringUtils.isEmpty(context.getSessionVariable().groupCommit)) {
@@ -3550,6 +3632,7 @@ public class StmtExecutor {
                 context.setGroupCommit(true);
             }
             OlapInsertExecutor insertExecutor = (OlapInsertExecutor) insert.initPlan(context, this);
+            HttpStreamParams httpStreamParams = new HttpStreamParams();
             httpStreamParams.setTxnId(insertExecutor.getTxnId());
             httpStreamParams.setDb(insertExecutor.getDatabase());
             httpStreamParams.setTable(insertExecutor.getTable());
@@ -3566,6 +3649,7 @@ public class StmtExecutor {
             if (!isValidPlan) {
                 throw new AnalysisException("plan is invalid: " + planRoot.getExplainString());
             }
+            return httpStreamParams;
         } catch (QueryStateException e) {
             LOG.debug("Command(" + originStmt.originStmt + ") process failed.", e);
             context.setState(e.getQueryState());
@@ -3584,7 +3668,6 @@ public class StmtExecutor {
             throw new NereidsException("Command (" + originStmt.originStmt + ") process failed.",
                     new AnalysisException(e.getMessage(), e));
         }
-        return httpStreamParams;
     }
 
     private HttpStreamParams generateHttpStreamLegacyPlan(TUniqueId queryId) throws Exception {
@@ -3616,12 +3699,11 @@ public class StmtExecutor {
 
     public HttpStreamParams generateHttpStreamPlan(TUniqueId queryId) throws Exception {
         SessionVariable sessionVariable = context.getSessionVariable();
-        HttpStreamParams httpStreamParams = null;
         try {
             try {
                 // disable shuffle for http stream (only 1 sink)
                 sessionVariable.setVarOnce(SessionVariable.ENABLE_STRICT_CONSISTENCY_DML, "false");
-                httpStreamParams = generateHttpStreamNereidsPlan(queryId);
+                return generateHttpStreamNereidsPlan(queryId);
             } catch (NereidsException | ParseException e) {
                 if (context.getMinidump() != null && context.getMinidump().toString(4) != null) {
                     MinidumpUtils.saveMinidumpString(context.getMinidump(), DebugUtil.printId(context.queryId()));
@@ -3633,8 +3715,8 @@ public class StmtExecutor {
                 }
                 if (e instanceof NereidsException) {
                     LOG.warn("Analyze failed. {}", context.getQueryIdentifier(), e);
-                    throw ((NereidsException) e).getException();
                 }
+                throw e;
             } catch (Exception e) {
                 throw new RuntimeException(e);
             }
@@ -3650,7 +3732,6 @@ public class StmtExecutor {
                 context.getState().setError(e.getMysqlErrorCode(), e.getMessage());
             }
         }
-        return httpStreamParams;
     }
 
     public SummaryProfile getSummaryProfile() {
@@ -3697,5 +3778,9 @@ public class StmtExecutor {
         for (ByteBuffer byteBuffer : queryResultBufList) {
             context.getMysqlChannel().sendOnePacket(byteBuffer);
         }
+    }
+
+    public String getPrepareStmtName() {
+        return this.prepareStmtName;
     }
 }

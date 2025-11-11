@@ -160,7 +160,13 @@ public class CloudInternalCatalog extends InternalCatalog {
             Cloud.CreateTabletsRequest.Builder requestBuilder = Cloud.CreateTabletsRequest.newBuilder();
             List<String> rowStoreColumns =
                     tbl.getTableProperty().getCopiedRowStoreColumns();
+            TInvertedIndexFileStorageFormat effectiveIndexStorageFormat =
+                        (Config.enable_new_partition_inverted_index_v2_format
+                                && tbl.getInvertedIndexFileStorageFormat() == TInvertedIndexFileStorageFormat.V1)
+                                ? TInvertedIndexFileStorageFormat.V2
+                                : tbl.getInvertedIndexFileStorageFormat();
             for (Tablet tablet : index.getTablets()) {
+                // Use resolved format that considers global override for new partitions
                 OlapFile.TabletMetaCloudPB.Builder builder = createTabletMetaBuilder(tbl.getId(), indexId,
                         partitionId, tablet, tabletType, schemaHash, keysType, shortKeyColumnCount,
                         bfColumns, tbl.getBfFpp(), indexes, columns, tbl.getDataSortInfo(),
@@ -174,7 +180,7 @@ public class CloudInternalCatalog extends InternalCatalog {
                         tbl.disableAutoCompaction(),
                         tbl.getRowStoreColumnsUniqueIds(rowStoreColumns),
                         tbl.getEnableMowLightDelete(),
-                        tbl.getInvertedIndexFileStorageFormat(),
+                        effectiveIndexStorageFormat,
                         tbl.rowStorePageSize(),
                         tbl.variantEnableFlattenNested(),
                         tbl.storagePageSize());
@@ -335,6 +341,12 @@ public class CloudInternalCatalog extends InternalCatalog {
         if (invertedIndexFileStorageFormat != null) {
             if (invertedIndexFileStorageFormat == TInvertedIndexFileStorageFormat.V1) {
                 schemaBuilder.setInvertedIndexStorageFormat(OlapFile.InvertedIndexStorageFormatPB.V1);
+            } else if (invertedIndexFileStorageFormat == TInvertedIndexFileStorageFormat.DEFAULT) {
+                if (Config.inverted_index_storage_format.equalsIgnoreCase("V1")) {
+                    schemaBuilder.setInvertedIndexStorageFormat(OlapFile.InvertedIndexStorageFormatPB.V1);
+                } else {
+                    schemaBuilder.setInvertedIndexStorageFormat(OlapFile.InvertedIndexStorageFormatPB.V2);
+                }
             } else {
                 schemaBuilder.setInvertedIndexStorageFormat(OlapFile.InvertedIndexStorageFormatPB.V2);
             }
@@ -838,7 +850,7 @@ public class CloudInternalCatalog extends InternalCatalog {
         }
     }
 
-    public void removeSchemaChangeJob(long dbId, long tableId, long indexId, long newIndexId,
+    public void removeSchemaChangeJob(long jobId, long dbId, long tableId, long indexId, long newIndexId,
             long partitionId, long tabletId, long newTabletId)
             throws DdlException {
         Cloud.FinishTabletJobRequest.Builder finishTabletJobRequestBuilder = Cloud.FinishTabletJobRequest.newBuilder();
@@ -867,6 +879,7 @@ public class CloudInternalCatalog extends InternalCatalog {
         newtabletIndexPBBuilder.setTabletId(newTabletId);
         final Cloud.TabletIndexPB newtabletIndex = newtabletIndexPBBuilder.build();
         schemaChangeJobPBBuilder.setNewTabletIdx(newtabletIndex);
+        schemaChangeJobPBBuilder.setId(String.valueOf(jobId));
         final Cloud.TabletSchemaChangeJobPB tabletSchemaChangeJobPb =
                 schemaChangeJobPBBuilder.build();
 
@@ -995,21 +1008,27 @@ public class CloudInternalCatalog extends InternalCatalog {
             LOG.warn("replay update cloud replica, unknown table {}", info.toString());
             return;
         }
+        LOG.debug("replay update a cloud replica {}", info);
 
-        olapTable.writeLock();
         try {
             unprotectUpdateCloudReplica(olapTable, info);
         } catch (Exception e) {
             LOG.warn("unexpected exception", e);
-        } finally {
-            olapTable.writeUnlock();
         }
     }
 
     private void unprotectUpdateCloudReplica(OlapTable olapTable, UpdateCloudReplicaInfo info) {
-        LOG.debug("replay update a cloud replica {}", info);
         Partition partition = olapTable.getPartition(info.getPartitionId());
+        if (partition == null) {
+            LOG.warn("replay update cloud replica, unknown partition {}, may be dropped", info.toString());
+            return;
+        }
+
         MaterializedIndex materializedIndex = partition.getIndex(info.getIndexId());
+        if (materializedIndex == null) {
+            LOG.warn("replay update cloud replica, unknown index {}, may be dropped", info.toString());
+            return;
+        }
 
         try {
             if (info.getTabletId() != -1) {

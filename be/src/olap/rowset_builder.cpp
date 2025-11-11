@@ -135,11 +135,11 @@ Status BaseRowsetBuilder::init_mow_context(std::shared_ptr<MowContext>& mow_cont
                     "Unable to do 'partial_update' when "
                     "the tablet is undergoing a 'schema changing process'");
         }
-        _rowset_ids.clear();
+        _rowset_ids->clear();
     } else {
         RETURN_IF_ERROR(
-                tablet()->get_all_rs_id_unlocked(_max_version_in_flush_phase, &_rowset_ids));
-        rowset_ptrs = tablet()->get_rowset_by_ids(&_rowset_ids);
+                tablet()->get_all_rs_id_unlocked(_max_version_in_flush_phase, _rowset_ids.get()));
+        rowset_ptrs = tablet()->get_rowset_by_ids(_rowset_ids.get());
     }
     _delete_bitmap = std::make_shared<DeleteBitmap>(tablet()->tablet_id());
     mow_context = std::make_shared<MowContext>(_max_version_in_flush_phase, _req.txn_id,
@@ -151,9 +151,10 @@ Status RowsetBuilder::check_tablet_version_count() {
     bool injection = false;
     DBUG_EXECUTE_IF("RowsetBuilder.check_tablet_version_count.too_many_version",
                     { injection = true; });
+    int32_t max_version_config = _tablet->max_version_config();
     if (injection) {
         // do not return if injection
-    } else if (!_tablet->exceed_version_limit(config::max_tablet_version_num - 100) ||
+    } else if (!_tablet->exceed_version_limit(max_version_config - 100) ||
                GlobalMemoryArbitrator::is_exceed_soft_mem_limit(GB_EXCHANGE_BYTE)) {
         return Status::OK();
     }
@@ -167,12 +168,13 @@ Status RowsetBuilder::check_tablet_version_count() {
     int version_count = tablet()->version_count();
     DBUG_EXECUTE_IF("RowsetBuilder.check_tablet_version_count.too_many_version",
                     { version_count = INT_MAX; });
-    if (version_count > config::max_tablet_version_num) {
+    if (version_count > max_version_config) {
         return Status::Error<TOO_MANY_VERSION>(
                 "failed to init rowset builder. version count: {}, exceed limit: {}, "
                 "tablet: {}. Please reduce the frequency of loading data or adjust the "
-                "max_tablet_version_num in be.conf to a larger value.",
-                version_count, config::max_tablet_version_num, _tablet->tablet_id());
+                "max_tablet_version_num or time_series_max_tablet_version_num in be.conf to a "
+                "larger value.",
+                version_count, max_version_config, _tablet->tablet_id());
     }
     return Status::OK();
 }
@@ -258,7 +260,7 @@ Status BaseRowsetBuilder::build_rowset() {
 }
 
 Status BaseRowsetBuilder::submit_calc_delete_bitmap_task() {
-    if (!_tablet->enable_unique_key_merge_on_write()) {
+    if (!_tablet->enable_unique_key_merge_on_write() || _rowset->num_segments() == 0) {
         return Status::OK();
     }
     std::lock_guard<std::mutex> l(_lock);
@@ -268,16 +270,13 @@ Status BaseRowsetBuilder::submit_calc_delete_bitmap_task() {
     RETURN_IF_ERROR(beta_rowset->load_segments(&segments));
     if (segments.size() > 1) {
         // calculate delete bitmap between segments
-        RETURN_IF_ERROR(
-                _tablet->calc_delete_bitmap_between_segments(_rowset, segments, _delete_bitmap));
-    }
-
-    // tablet is under alter process. The delete bitmap will be calculated after conversion.
-    if (_tablet->tablet_state() == TABLET_NOTREADY) {
-        LOG(INFO) << "tablet is under alter process, delete bitmap will be calculated later, "
-                     "tablet_id: "
-                  << _tablet->tablet_id() << " txn_id: " << _req.txn_id;
-        return Status::OK();
+        if (config::enable_calc_delete_bitmap_between_segments_concurrently) {
+            RETURN_IF_ERROR(_calc_delete_bitmap_token->submit(
+                    _tablet, _tablet_schema, _rowset->rowset_id(), segments, _delete_bitmap));
+        } else {
+            RETURN_IF_ERROR(_tablet->calc_delete_bitmap_between_segments(
+                    _tablet_schema, _rowset->rowset_id(), segments, _delete_bitmap));
+        }
     }
 
     // For partial update, we need to fill in the entire row of data, during the calculation
@@ -290,7 +289,7 @@ Status BaseRowsetBuilder::submit_calc_delete_bitmap_task() {
                 "partial update calc delete bitmap summary before commit: tablet({}), txn_id({}), "
                 "rowset_ids({}), cur max_version({}), bitmap num({}), bitmap_cardinality({}), num "
                 "rows updated({}), num rows new added({}), num rows deleted({}), total rows({})",
-                tablet()->tablet_id(), _req.txn_id, _rowset_ids.size(),
+                tablet()->tablet_id(), _req.txn_id, _rowset_ids->size(),
                 rowset_writer()->context().mow_context->max_version,
                 _delete_bitmap->get_delete_bitmap_count(), _delete_bitmap->cardinality(),
                 rowset_writer()->num_rows_updated(), rowset_writer()->num_rows_new_added(),
@@ -300,7 +299,7 @@ Status BaseRowsetBuilder::submit_calc_delete_bitmap_task() {
 
     LOG(INFO) << "submit calc delete bitmap task to executor, tablet_id: " << tablet()->tablet_id()
               << ", txn_id: " << _req.txn_id;
-    return BaseTablet::commit_phase_update_delete_bitmap(_tablet, _rowset, _rowset_ids,
+    return BaseTablet::commit_phase_update_delete_bitmap(_tablet, _rowset, *_rowset_ids,
                                                          _delete_bitmap, segments, _req.txn_id,
                                                          _calc_delete_bitmap_token.get(), nullptr);
 }
@@ -320,7 +319,7 @@ Status RowsetBuilder::commit_txn() {
         config::enable_merge_on_write_correctness_check && _rowset->num_rows() != 0 &&
         tablet()->tablet_state() != TABLET_NOTREADY) {
         auto st = tablet()->check_delete_bitmap_correctness(
-                _delete_bitmap, _rowset->end_version() - 1, _req.txn_id, _rowset_ids);
+                _delete_bitmap, _rowset->end_version() - 1, _req.txn_id, *_rowset_ids);
         if (!st.ok()) {
             LOG(WARNING) << fmt::format(
                     "[tablet_id:{}][txn_id:{}][load_id:{}][partition_id:{}] "
@@ -365,7 +364,7 @@ Status RowsetBuilder::commit_txn() {
     if (_tablet->enable_unique_key_merge_on_write()) {
         _engine.txn_manager()->set_txn_related_delete_bitmap(
                 _req.partition_id, _req.txn_id, tablet()->tablet_id(), tablet()->tablet_uid(), true,
-                _delete_bitmap, _rowset_ids, _partial_update_info);
+                _delete_bitmap, *_rowset_ids, _partial_update_info);
     }
 
     _is_committed = true;

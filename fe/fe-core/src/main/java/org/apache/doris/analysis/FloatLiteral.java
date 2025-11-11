@@ -19,6 +19,8 @@ package org.apache.doris.analysis;
 
 import org.apache.doris.catalog.PrimitiveType;
 import org.apache.doris.catalog.ScalarType;
+import org.apache.doris.catalog.TableIf;
+import org.apache.doris.catalog.TableIf.TableType;
 import org.apache.doris.catalog.Type;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.Config;
@@ -138,6 +140,12 @@ public class FloatLiteral extends NumericLiteralExpr {
     }
 
     @Override
+    public String toSqlImpl(boolean disableTableName, boolean needExternalSql, TableType tableType,
+            TableIf table) {
+        return getStringValue();
+    }
+
+    @Override
     public String getStringValue() {
         // TODO: Here is weird use float to represent TIME type
         // rethink whether it is reasonable to use this way
@@ -155,28 +163,28 @@ public class FloatLiteral extends NumericLiteralExpr {
     }
 
     @Override
-    public String getStringValueInFe(FormatOptions options) {
+    public String getStringValueForQuery(FormatOptions options) {
         if (type == Type.TIME || type == Type.TIMEV2) {
             // FloatLiteral used to represent TIME type, here we need to remove apostrophe from timeStr
             // for example '11:22:33' -> 11:22:33
             String timeStr = getStringValue();
             return timeStr.substring(1, timeStr.length() - 1);
         } else {
-            if (Double.isInfinite(getValue())) {
-                return Double.toString(getValue());
+            double value = getValue();
+            if (Double.isInfinite(value)) {
+                return value > 0 ? "inf" : "-inf";
             }
-            return BigDecimal.valueOf(getValue()).toPlainString();
+            return BigDecimal.valueOf(getValue()).stripTrailingZeros().toPlainString();
         }
     }
 
     @Override
-    public String getStringValueForArray(FormatOptions options) {
-        String ret = getStringValue();
+    protected String getStringValueInComplexTypeForQuery(FormatOptions options) {
+        String ret = this.getStringValueForQuery(options);
         if (type == Type.TIME || type == Type.TIMEV2) {
-            // here already wrapped in ''
-            ret = ret.substring(1, ret.length() - 1);
+            ret = options.getNestedStringWrapper() + ret + options.getNestedStringWrapper();
         }
-        return options.getNestedStringWrapper() + ret + options.getNestedStringWrapper();
+        return ret;
     }
 
     public static Type getDefaultTimeType(Type type) throws AnalysisException {

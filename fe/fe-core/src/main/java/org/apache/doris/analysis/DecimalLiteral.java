@@ -19,6 +19,8 @@ package org.apache.doris.analysis;
 
 import org.apache.doris.catalog.PrimitiveType;
 import org.apache.doris.catalog.ScalarType;
+import org.apache.doris.catalog.TableIf;
+import org.apache.doris.catalog.TableIf.TableType;
 import org.apache.doris.catalog.Type;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.Config;
@@ -266,7 +268,7 @@ public class DecimalLiteral extends NumericLiteralExpr {
     }
 
     @Override
-    public String getStringValueInFe(FormatOptions options) {
+    public String getStringValueForQuery(FormatOptions options) {
         return value.toPlainString();
     }
 
@@ -276,13 +278,14 @@ public class DecimalLiteral extends NumericLiteralExpr {
     }
 
     @Override
-    public String getStringValue() {
-        return value.toPlainString();
+    public String toSqlImpl(boolean disableTableName, boolean needExternalSql, TableType tableType,
+            TableIf table) {
+        return getStringValue();
     }
 
     @Override
-    public String getStringValueForArray(FormatOptions options) {
-        return options.getNestedStringWrapper() + getStringValue() + options.getNestedStringWrapper();
+    public String getStringValue() {
+        return value.toPlainString();
     }
 
     @Override

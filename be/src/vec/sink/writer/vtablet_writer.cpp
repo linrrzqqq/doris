@@ -126,8 +126,8 @@ Status IndexChannel::init(RuntimeState* state, const std::vector<TTabletWithPart
                 if (incremental) {
                     _has_inc_node = true;
                 }
-                LOG(INFO) << "init new node for instance " << _parent->_sender_id
-                          << ", incremantal:" << incremental;
+                VLOG_CRITICAL << "init new node for instance " << _parent->_sender_id
+                              << ", incremantal:" << incremental;
             } else {
                 channel = it->second;
             }
@@ -166,7 +166,7 @@ void IndexChannel::mark_as_failed(const VNodeChannel* node_channel, const std::s
     }
 
     {
-        std::lock_guard<doris::SpinLock> l(_fail_lock);
+        std::lock_guard<std::mutex> l(_fail_lock);
         if (tablet_id == -1) {
             for (const auto the_tablet_id : it->second) {
                 _failed_channels[the_tablet_id].insert(node_id);
@@ -189,7 +189,7 @@ void IndexChannel::mark_as_failed(const VNodeChannel* node_channel, const std::s
 }
 
 Status IndexChannel::check_intolerable_failure() {
-    std::lock_guard<doris::SpinLock> l(_fail_lock);
+    std::lock_guard<std::mutex> l(_fail_lock);
     return _intolerable_failure_status;
 }
 
@@ -197,7 +197,7 @@ void IndexChannel::set_error_tablet_in_state(RuntimeState* state) {
     std::vector<TErrorTabletInfo> error_tablet_infos;
 
     {
-        std::lock_guard<doris::SpinLock> l(_fail_lock);
+        std::lock_guard<std::mutex> l(_fail_lock);
         for (const auto& it : _failed_channels_msgs) {
             TErrorTabletInfo error_info;
             error_info.__set_tabletId(it.first);
@@ -521,7 +521,7 @@ Status VNodeChannel::add_block(vectorized::Block* block, const Payload* payload)
     auto st = none_of({_cancelled, _eos_is_produced});
     if (!st.ok()) {
         if (_cancelled) {
-            std::lock_guard<doris::SpinLock> l(_cancel_msg_lock);
+            std::lock_guard<std::mutex> l(_cancel_msg_lock);
             return Status::Error<ErrorCode::INTERNAL_ERROR, false>("add row failed. {}",
                                                                    _cancel_msg);
         } else {
@@ -620,7 +620,7 @@ int VNodeChannel::try_send_and_fetch_status(RuntimeState* state,
 void VNodeChannel::_cancel_with_msg(const std::string& msg) {
     LOG(WARNING) << "cancel node channel " << channel_info() << ", error message: " << msg;
     {
-        std::lock_guard<doris::SpinLock> l(_cancel_msg_lock);
+        std::lock_guard<std::mutex> l(_cancel_msg_lock);
         if (_cancel_msg.empty()) {
             _cancel_msg = msg;
         }
@@ -804,7 +804,17 @@ void VNodeChannel::_add_block_success_callback(const PTabletWriterAddBlockResult
         if (!st.ok()) {
             _cancel_with_msg(st.to_string());
         } else if (ctx._is_last_rpc) {
+            bool skip_tablet_info = false;
+            DBUG_EXECUTE_IF("VNodeChannel.add_block_success_callback.incomplete_commit_info",
+                            { skip_tablet_info = true; });
             for (const auto& tablet : result.tablet_vec()) {
+                DBUG_EXECUTE_IF("VNodeChannel.add_block_success_callback.incomplete_commit_info", {
+                    if (skip_tablet_info) {
+                        LOG(INFO) << "skip tablet info: " << tablet.tablet_id();
+                        skip_tablet_info = false;
+                        continue;
+                    }
+                });
                 TTabletCommitInfo commit_info;
                 commit_info.tabletId = tablet.tablet_id();
                 commit_info.backendId = _node_id;
@@ -945,7 +955,7 @@ Status VNodeChannel::close_wait(RuntimeState* state) {
     auto st = none_of({_cancelled, !_eos_is_produced});
     if (!st.ok()) {
         if (_cancelled) {
-            std::lock_guard<doris::SpinLock> l(_cancel_msg_lock);
+            std::lock_guard<std::mutex> l(_cancel_msg_lock);
             return Status::Error<ErrorCode::INTERNAL_ERROR, false>("wait close failed. {}",
                                                                    _cancel_msg);
         } else {
@@ -1556,6 +1566,12 @@ Status VTabletWriter::close(Status exec_status) {
     // will make the last batch of request-> close_wait will wait this finished.
     _do_try_close(_state, exec_status);
     TEST_INJECTION_POINT("VOlapTableSink::close");
+
+    DBUG_EXECUTE_IF("VTabletWriter.close.sleep", {
+        auto sleep_sec = DebugPoints::instance()->get_debug_param_or_default<int32_t>(
+                "VTabletWriter.close.sleep", "sleep_sec", 1);
+        std::this_thread::sleep_for(std::chrono::seconds(sleep_sec));
+    });
 
     // If _close_status is not ok, all nodes have been canceled in try_close.
     if (_close_status.ok()) {

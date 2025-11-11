@@ -214,4 +214,31 @@ public class AnalysisJobTest {
         Assertions.assertEquals(0, job.queryFinished.size());
     }
 
+    @Test
+    public void testSetSqlHash(@Mocked AnalysisInfo info,
+            @Mocked OlapAnalysisTask task1, @Mocked OlapAnalysisTask task2) {
+        AnalysisJob job = new AnalysisJob(info, Collections.singletonList(task1));
+        job.queryFinished = new HashSet<>();
+        job.queryFinished.add(task2);
+        new MockUp<AnalysisJob>() {
+            @Mock
+            public void updateTaskState(AnalysisState state, String msg) {
+            }
+
+            @Mock
+            protected void executeWithExceptionOnFail(StmtExecutor stmtExecutor) throws Exception {
+
+            }
+
+            @Mock
+            protected void syncLoadStats() {
+            }
+        };
+        job.buf.add(new ColStatsData());
+        job.flushBuffer();
+        Assertions.assertEquals(0, job.queryFinished.size());
+        Assertions.assertEquals(0, job.buf.size());
+        Assertions.assertEquals("d8c3a1696769a1862331eec30d2c1ecb", job.stmtExecutor.getContext().getSqlHash());
+    }
+
 }

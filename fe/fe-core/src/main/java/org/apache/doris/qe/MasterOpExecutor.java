@@ -25,6 +25,7 @@ import org.apache.doris.common.ClientPool;
 import org.apache.doris.common.Config;
 import org.apache.doris.common.DdlException;
 import org.apache.doris.common.ErrorCode;
+import org.apache.doris.mysql.MysqlCommand;
 import org.apache.doris.thrift.FrontendService;
 import org.apache.doris.thrift.TExpr;
 import org.apache.doris.thrift.TExprNode;
@@ -64,6 +65,8 @@ public class MasterOpExecutor {
     private int thriftTimeoutMs;
 
     private boolean shouldNotRetry;
+
+    protected boolean moreStmtExists = false;
 
     public MasterOpExecutor(OriginStatement originStmt, ConnectContext ctx, RedirectStatus status, boolean isQuery) {
         this.originStmt = originStmt;
@@ -211,6 +214,7 @@ public class MasterOpExecutor {
         params.setUserIp(ctx.getRemoteIP());
         params.setStmtId(ctx.getStmtId());
         params.setCurrentUserIdent(ctx.getCurrentUserIdentity().toThrift());
+        params.setMoreResultExists(moreStmtExists);
 
         if (Config.isCloudMode()) {
             String cluster = "";
@@ -235,6 +239,12 @@ public class MasterOpExecutor {
         // set transaction load info
         if (ctx.isTxnModel()) {
             params.setTxnLoadInfo(ctx.getTxnEntry().getTxnLoadInfoInObserver());
+        }
+
+        if (ctx.getCommand() == MysqlCommand.COM_STMT_EXECUTE) {
+            if (null != ctx.getPrepareExecuteBuffer()) {
+                params.setPrepareExecuteBuffer(ctx.getPrepareExecuteBuffer());
+            }
         }
         return params;
     }
@@ -286,6 +296,10 @@ public class MasterOpExecutor {
         // just make the protocol happy
         params.setSql("");
         return params;
+    }
+
+    public void setMoreStmtExists(boolean moreStmtExists) {
+        this.moreStmtExists = moreStmtExists;
     }
 
     public ByteBuffer getOutputPacket() {

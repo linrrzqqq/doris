@@ -84,12 +84,10 @@ public class S3TableValuedFunction extends ExternalFileTableValuedFunction {
                 // Azure could run without region
                 region = s3uri.getRegion().orElse("DUMMY-REGION");
             } else {
-                region = s3uri.getRegion().orElseThrow(() -> new AnalysisException(
-                        String.format("Properties '%s' is required.", S3Properties.REGION)));
+                region = PropertyConverter.checkRegion(endpoint, s3uri.getRegion().orElse(""), S3Properties.REGION);
             }
             otherProps.put(S3Properties.REGION, region);
         }
-        checkNecessaryS3Properties(otherProps);
         CloudCredentialWithEndpoint credential = new CloudCredentialWithEndpoint(endpoint,
                 getOrDefaultAndRemove(otherProps, S3Properties.REGION, ""),
                 getOrDefaultAndRemove(otherProps, S3Properties.ACCESS_KEY, ""),
@@ -104,6 +102,14 @@ public class S3TableValuedFunction extends ExternalFileTableValuedFunction {
             // For Azure's compatibility, we need bucket to connect to the blob storage's container
             locationProperties.put(S3Properties.BUCKET, s3uri.getBucket());
         }
+
+        if (properties.containsKey(S3Properties.ROLE_ARN)) {
+            locationProperties.put(S3Properties.ROLE_ARN, properties.get(S3Properties.ROLE_ARN));
+            if (properties.containsKey(S3Properties.EXTERNAL_ID)) {
+                locationProperties.put(S3Properties.EXTERNAL_ID, properties.get(S3Properties.EXTERNAL_ID));
+            }
+        }
+
         locationProperties.putAll(S3ClientBEProperties.getBeFSProperties(locationProperties));
         locationProperties.putAll(otherProps);
 

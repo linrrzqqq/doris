@@ -30,7 +30,7 @@ import org.apache.doris.nereids.rules.analysis.CheckPolicy;
 import org.apache.doris.nereids.rules.analysis.CollectJoinConstraint;
 import org.apache.doris.nereids.rules.analysis.CollectSubQueryAlias;
 import org.apache.doris.nereids.rules.analysis.EliminateDistinctConstant;
-import org.apache.doris.nereids.rules.analysis.EliminateGroupByConstant;
+import org.apache.doris.nereids.rules.analysis.EliminateLogicalPreAggOnHint;
 import org.apache.doris.nereids.rules.analysis.EliminateLogicalSelectHint;
 import org.apache.doris.nereids.rules.analysis.FillUpMissingSlots;
 import org.apache.doris.nereids.rules.analysis.HavingToFilter;
@@ -94,7 +94,8 @@ public class Analyzer extends AbstractBatchJobExecutor {
         return jobs(
             // we should eliminate hint before "Subquery unnesting".
             topDown(new AnalyzeCTE()),
-            topDown(new EliminateLogicalSelectHint()),
+            topDown(new EliminateLogicalSelectHint(),
+                    new EliminateLogicalPreAggOnHint()),
             bottomUp(
                     new BindRelation(),
                     new CheckPolicy()
@@ -137,8 +138,6 @@ public class Analyzer extends AbstractBatchJobExecutor {
             // select SUM(lo_tax) FROM lineorder group by 1;
             // errCode = 2, detailMessage = GROUP BY expression must not contain aggregate functions: sum(lo_tax)
             bottomUp(new CheckAnalysis()),
-            topDown(new EliminateGroupByConstant()),
-
             topDown(new SimplifyAggGroupBy()),
             topDown(new NormalizeAggregate()),
             topDown(new HavingToFilter()),
