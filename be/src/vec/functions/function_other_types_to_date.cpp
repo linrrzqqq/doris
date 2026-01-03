@@ -454,8 +454,10 @@ private:
 };
 
 struct DateTruncState {
-    using Callback_function = std::function<void(const ColumnPtr&, ColumnPtr& res, size_t)>;
+    using Callback_function =
+            std::function<void(const ColumnPtr&, ColumnPtr& res, size_t, const cctz::time_zone&)>;
     Callback_function callback_function;
+    cctz::time_zone timezone;
 };
 
 template <PrimitiveType PType, bool DateArgIsFirst>
@@ -497,6 +499,7 @@ struct DateTrunc {
                        [](unsigned char c) { return std::tolower(c); });
 
         std::shared_ptr<DateTruncState> state = std::make_shared<DateTruncState>();
+        state->timezone = context->state()->timezone_obj();
         if (std::strncmp("year", lower_str.data(), 4) == 0) {
             state->callback_function = &execute_impl_right_const<TimeUnit::YEAR>;
         } else if (std::strncmp("quarter", lower_str.data(), 7) == 0) {
@@ -532,7 +535,7 @@ struct DateTrunc {
         auto* state = reinterpret_cast<DateTruncState*>(
                 context->get_function_state(FunctionContext::THREAD_LOCAL));
         DCHECK(state != nullptr);
-        state->callback_function(datetime_column, res, input_rows_count);
+        state->callback_function(datetime_column, res, input_rows_count, state->timezone);
         block.replace_by_position(result, std::move(res));
         return Status::OK();
     }
@@ -540,13 +543,19 @@ struct DateTrunc {
 private:
     template <TimeUnit Unit>
     static void execute_impl_right_const(const ColumnPtr& datetime_column, ColumnPtr& result_column,
-                                         size_t input_rows_count) {
+                                         size_t input_rows_count, const cctz::time_zone& timezone) {
         auto& data = static_cast<const ColumnType*>(datetime_column.get())->get_data();
         auto& res = static_cast<ColumnType*>(result_column->assume_mutable().get())->get_data();
         for (size_t i = 0; i < input_rows_count; ++i) {
             auto dt = binary_cast<NativeType, DateValueType>(data[i]);
+            if constexpr (PType == TYPE_TIMESTAMPTZ) {
+                dt.convert_utc_to_local(timezone);
+            }
             if (!dt.template datetime_trunc<Unit>()) {
                 throw_out_of_bound_one_date<DateValueType>(name, data[i]);
+            }
+            if constexpr (PType == TYPE_TIMESTAMPTZ) {
+                dt.convert_local_to_utc(timezone);
             }
             res[i] = binary_cast<DateValueType, NativeType>(dt);
         }
@@ -1179,8 +1188,10 @@ public:
     Status open(FunctionContext* context, FunctionContext::FunctionStateScope scope) override {
         if constexpr (std::is_same_v<Impl, DateTrunc<TYPE_DATEV2, true>> ||
                       std::is_same_v<Impl, DateTrunc<TYPE_DATETIMEV2, true>> ||
+                      std::is_same_v<Impl, DateTrunc<TYPE_TIMESTAMPTZ, true>> ||
                       std::is_same_v<Impl, DateTrunc<TYPE_DATEV2, false>> ||
-                      std::is_same_v<Impl, DateTrunc<TYPE_DATETIMEV2, false>>) {
+                      std::is_same_v<Impl, DateTrunc<TYPE_DATETIMEV2, false>> ||
+                      std::is_same_v<Impl, DateTrunc<TYPE_TIMESTAMPTZ, false>>) {
             return Impl::open(context, scope);
         } else {
             return Status::OK();
@@ -1427,10 +1438,14 @@ using FunctionMakeDate = FunctionOtherTypesToDateType<MakeDateImpl>;
 
 using FunctionDateTruncDateV2 = FunctionOtherTypesToDateType<DateTrunc<TYPE_DATEV2, true>>;
 using FunctionDateTruncDatetimeV2 = FunctionOtherTypesToDateType<DateTrunc<TYPE_DATETIMEV2, true>>;
+using FunctionDateTruncTimestamptz =
+        FunctionOtherTypesToDateType<DateTrunc<TYPE_TIMESTAMPTZ, true>>;
 using FunctionDateTruncDateV2WithCommonOrder =
         FunctionOtherTypesToDateType<DateTrunc<TYPE_DATEV2, false>>;
 using FunctionDateTruncDatetimeV2WithCommonOrder =
         FunctionOtherTypesToDateType<DateTrunc<TYPE_DATETIMEV2, false>>;
+using FunctionDateTruncTimestamptzWithCommonOrder =
+        FunctionOtherTypesToDateType<DateTrunc<TYPE_TIMESTAMPTZ, false>>;
 using FunctionFromIso8601DateV2 = FunctionOtherTypesToDateType<FromIso8601DateV2>;
 
 void register_function_timestamp(SimpleFunctionFactory& factory) {
@@ -1441,8 +1456,10 @@ void register_function_timestamp(SimpleFunctionFactory& factory) {
     factory.register_function<FromDays>();
     factory.register_function<FunctionDateTruncDateV2>();
     factory.register_function<FunctionDateTruncDatetimeV2>();
+    factory.register_function<FunctionDateTruncTimestamptz>();
     factory.register_function<FunctionDateTruncDateV2WithCommonOrder>();
     factory.register_function<FunctionDateTruncDatetimeV2WithCommonOrder>();
+    factory.register_function<FunctionDateTruncTimestamptzWithCommonOrder>();
     factory.register_function<FunctionFromIso8601DateV2>();
 
     factory.register_function<FunctionUnixTimestamp<UnixTimeStampImpl<>>>();
