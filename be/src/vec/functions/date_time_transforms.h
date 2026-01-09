@@ -39,6 +39,7 @@
 #include "vec/data_types/data_type_decimal.h"
 #include "vec/data_types/data_type_string.h"
 #include "vec/functions/date_format_type.h"
+#include "vec/runtime/time_value.h"
 #include "vec/runtime/vdatetime_value.h"
 #include "vec/utils/util.hpp"
 
