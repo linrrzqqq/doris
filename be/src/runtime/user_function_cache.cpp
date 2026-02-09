@@ -42,6 +42,7 @@
 #include "io/fs/local_file_system.h"
 #include "runtime/exec_env.h"
 #include "runtime/plugin/cloud_plugin_downloader.h"
+#include "udf/python/python_server.h"
 #include "util/defer_op.h"
 #include "util/dynamic_util.h"
 #include "util/md5.h"
@@ -111,7 +112,20 @@ UserFunctionCacheEntry::~UserFunctionCacheEntry() {
 
     // delete library file if should_delete_library is set
     if (should_delete_library.load()) {
-        unlink(lib_file.c_str());
+        if (type == LibType::PY_ZIP) {
+            // For Python UDF, we need to delete both the unzipped directory and the original zip file.
+            auto st = io::global_local_filesystem()->delete_directory_or_file(lib_file);
+
+            st = io::global_local_filesystem()->delete_file(lib_file + ".zip");
+
+            if (!st.ok()) [[unlikely]] {
+                LOG(WARNING) << "failed to delete python udf files, lib_file=" << lib_file << ": "
+                             << st.to_string();
+            }
+
+        } else {
+            unlink(lib_file.c_str());
+        }
     }
 }
 
@@ -174,10 +188,20 @@ Status UserFunctionCache::_load_entry_from_lib(const std::string& dir, const std
                      << ", other_checksum info: = " << it->second->debug_string();
         return Status::InternalError("duplicate function id");
     }
+
+    std::string full_path = dir + "/" + file;
     // create a cache entry and put it into entry map
-    std::shared_ptr<UserFunctionCacheEntry> entry = UserFunctionCacheEntry::create_shared(
-            function_id, checksum, dir + "/" + file, lib_type);
+    std::shared_ptr<UserFunctionCacheEntry> entry =
+            UserFunctionCacheEntry::create_shared(function_id, checksum, full_path, lib_type);
     entry->is_downloaded = true;
+
+    // For Python UDF, _check_cache_is_python_udf has already unzipped the file.
+    // Set lib_file to the unzipped directory.
+    if (lib_type == LibType::PY_ZIP) {
+        entry->lib_file = full_path.substr(0, full_path.size() - 4);
+        entry->is_unziped = true;
+    }
+
     _entry_map[function_id] = entry;
 
     return Status::OK();
@@ -545,6 +569,31 @@ Status UserFunctionCache::_check_and_return_default_java_udf_url(const std::stri
     // Return the file path regardless of whether it exists (original UDF behavior)
     *result_url = "file://" + default_url + "/" + url;
     return Status::OK();
+}
+
+void UserFunctionCache::drop_function_cache(int64_t fid) {
+    std::shared_ptr<UserFunctionCacheEntry> entry = nullptr;
+    {
+        std::lock_guard<std::mutex> l(_cache_lock);
+        auto it = _entry_map.find(fid);
+        if (it == _entry_map.end()) {
+            return;
+        }
+        entry = it->second;
+        _entry_map.erase(it);
+    }
+
+    // For Python UDF, clear module cache in Python server before deleting files
+    if (entry->type == LibType::PY_ZIP && !entry->lib_file.empty()) {
+        auto status = PythonServerManager::instance().clear_module_cache(entry->lib_file);
+        if (!status.ok()) [[unlikely]] {
+            LOG(WARNING) << "drop_function_cache: failed to clear Python module cache for "
+                         << entry->lib_file << ": " << status.to_string();
+        }
+    }
+
+    // Mark for deletion, destructor will delete the files
+    entry->should_delete_library.store(true);
 }
 
 } // namespace doris
