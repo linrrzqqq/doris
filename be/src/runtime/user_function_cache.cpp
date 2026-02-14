@@ -112,19 +112,15 @@ UserFunctionCacheEntry::~UserFunctionCacheEntry() {
 
     // delete library file if should_delete_library is set
     if (should_delete_library.load()) {
+        WARN_IF_ERROR(
+                io::global_local_filesystem()->delete_directory_or_file(lib_file),
+                "failed to delete unzipped directory of python udf library, lib_file=" + lib_file);
+
         if (type == LibType::PY_ZIP) {
             // For Python UDF, we need to delete both the unzipped directory and the original zip file.
-            auto st = io::global_local_filesystem()->delete_directory_or_file(lib_file);
-
-            st = io::global_local_filesystem()->delete_file(lib_file + ".zip");
-
-            if (!st.ok()) [[unlikely]] {
-                LOG(WARNING) << "failed to delete python udf files, lib_file=" << lib_file << ": "
-                             << st.to_string();
-            }
-
-        } else {
-            unlink(lib_file.c_str());
+            std::string zip_file = lib_file + ".zip";
+            WARN_IF_ERROR(io::global_local_filesystem()->delete_directory_or_file(zip_file),
+                          "failed to delete zip file of python udf library, lib_file=" + zip_file);
         }
     }
 }
