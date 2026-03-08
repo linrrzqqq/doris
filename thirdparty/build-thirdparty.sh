@@ -1989,6 +1989,45 @@ build_pugixml() {
     cp "${TP_SOURCE_DIR}/${PUGIXML_SOURCE}/src/pugiconfig.hpp" "${TP_INSTALL_DIR}/include/"
 }
 
+# geos
+build_geos() {
+    check_if_source_exist "${GEOS_SOURCE}"
+    cd "${TP_SOURCE_DIR}/${GEOS_SOURCE}"
+
+    rm -rf "${BUILD_DIR}"
+    mkdir -p "${BUILD_DIR}"
+    cd "${BUILD_DIR}"
+
+    "${CMAKE_CMD}" -G "${GENERATOR}" \
+        -DCMAKE_INSTALL_PREFIX="${TP_INSTALL_DIR}" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_SHARED_LIBS=OFF \
+        -DBUILD_TESTING=OFF \
+        -DCMAKE_EXE_LINKER_FLAGS="-lpthread" \
+        ..
+    "${BUILD_SYSTEM}" -j "${PARALLEL}"
+    "${BUILD_SYSTEM}" install
+}
+
+# geographiclib
+build_geographiclib() {
+    check_if_source_exist "${GEOGRAPHICLIB_SOURCE}"
+    cd "${TP_SOURCE_DIR}/${GEOGRAPHICLIB_SOURCE}"
+
+    rm -rf "${BUILD_DIR}"
+    mkdir -p "${BUILD_DIR}"
+    cd "${BUILD_DIR}"
+
+    "${CMAKE_CMD}" -G "${GENERATOR}" \
+        -DCMAKE_INSTALL_PREFIX="${TP_INSTALL_DIR}" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_SHARED_LIBS=OFF \
+        -DBUILD_DOCUMENTATION=OFF \
+        ..
+    "${BUILD_SYSTEM}" -j "${PARALLEL}"
+    "${BUILD_SYSTEM}" install
+}
+
 # paimon-cpp
 build_paimon_cpp() {
     check_if_source_exist "${PAIMON_CPP_SOURCE}"
@@ -2140,6 +2179,8 @@ if [[ "${#packages[@]}" -eq 0 ]]; then
         icu
         pugixml
         paimon_cpp
+        geos
+        geographiclib
     )
     if [[ "$(uname -s)" == 'Darwin' ]]; then
         read -r -a packages <<<"binutils gettext ${packages[*]}"
@@ -2238,6 +2279,8 @@ cleanup_package_source() {
         jindofs)         src_var="JINDOFS_SOURCE" ;;
         pugixml)         src_var="PUGIXML_SOURCE" ;;
         paimon_cpp)      src_var="PAIMON_CPP_SOURCE" ;;
+        geos)            src_var="GEOS_SOURCE" ;;
+        geographiclib)   src_var="GEOGRAPHICLIB_SOURCE" ;;
         aws_sdk)         src_var="AWS_SDK_SOURCE" ;;
         lzma)            src_var="LZMA_SOURCE" ;;
         xml2)            src_var="XML2_SOURCE" ;;

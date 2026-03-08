@@ -40,6 +40,8 @@ using S2Point = Vector3_d;
 
 namespace doris {
 
+enum class GeoMode;
+
 class GeoShape {
 public:
     virtual ~GeoShape() = default;
@@ -184,6 +186,8 @@ public:
     const S2Polygon* polygon() const { return _polygon.get(); }
 
     bool intersects(const GeoShape* rhs) const override;
+    template <GeoMode mode>
+    bool intersects(const GeoShape* rhs) const;
     bool disjoint(const GeoShape* rhs) const override;
     bool touches(const GeoShape* rhs) const override;
     bool contains(const GeoShape* rhs) const override;
