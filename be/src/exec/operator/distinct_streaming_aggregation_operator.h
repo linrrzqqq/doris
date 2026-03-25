@@ -56,6 +56,7 @@ private:
                                               ColumnRawPtrs& key_columns, const uint32_t num_rows);
     void _make_nullable_output_key(Block* block);
     bool _should_expand_preagg_hash_tables();
+    void _update_memusage();
 
     void _swap_cache_block(Block* block) {
         DCHECK(!_cache_block.is_empty_column());
@@ -84,6 +85,7 @@ private:
     RuntimeProfile::Counter* _hash_table_input_counter = nullptr;
     RuntimeProfile::Counter* _hash_table_size_counter = nullptr;
     RuntimeProfile::Counter* _insert_keys_to_column_timer = nullptr;
+    RuntimeProfile::HighWaterMarkCounter* _serialize_key_arena_memory_usage = nullptr;
 
     bool _is_single_backend = false;
 };

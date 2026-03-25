@@ -54,6 +54,9 @@ Status DistinctStreamingAggLocalState::init(RuntimeState* state, LocalStateInfo&
             ADD_COUNTER(Base::custom_profile(), "HashTableInputCount", TUnit::UNIT);
     _hash_table_size_counter = ADD_COUNTER(custom_profile(), "HashTableSize", TUnit::UNIT);
     _insert_keys_to_column_timer = ADD_TIMER(custom_profile(), "InsertKeysToColumnTime");
+    _serialize_key_arena_memory_usage =
+            Base::custom_profile()->AddHighWaterMarkCounter("SerializeKeyArenaMemoryUsage",
+                                                            TUnit::BYTES, "", 1);
 
     return Status::OK();
 }
@@ -294,8 +297,23 @@ void DistinctStreamingAggLocalState::_emplace_into_hash_table_to_distinct(
                                                   [&](uint32_t r) { row = r; });
 
                           COUNTER_UPDATE(_hash_table_input_counter, num_rows);
-                      }},
+                        _update_memusage();
+                    }},
             _agg_data->method_variant);
+}
+
+void DistinctStreamingAggLocalState::_update_memusage() {
+    std::visit(vectorized::Overload {
+                       [&](std::monostate& arg) {},
+                       [&](auto& agg_method) {
+                           auto arena_memory_usage = _arena.size();
+                           COUNTER_SET(_serialize_key_arena_memory_usage, arena_memory_usage);
+                           auto hash_table_memory_usage =
+                                   agg_method.hash_table->get_buffer_size_in_bytes();
+                           COUNTER_SET(_memory_used_counter,
+                                       arena_memory_usage + hash_table_memory_usage);
+                         }},
+               _agg_data->method_variant);
 }
 
 DistinctStreamingAggOperatorX::DistinctStreamingAggOperatorX(ObjectPool* pool, int operator_id,
