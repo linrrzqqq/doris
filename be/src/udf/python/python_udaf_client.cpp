@@ -426,6 +426,8 @@ Status PythonUDAFClient::_send_request(const UDAFMetadata& metadata,
     }
 
     arrow::flight::FlightStreamChunk chunk = std::move(*read_res);
+    RETURN_IF_ERROR(handle_chunk_metadata(chunk));
+
     if (!chunk.data) {
         return Status::InternalError("Received empty RecordBatch from {} server", _operation_name);
     }

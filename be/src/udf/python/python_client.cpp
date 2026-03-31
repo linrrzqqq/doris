@@ -17,6 +17,8 @@
 
 #include "udf/python/python_client.h"
 
+#include <string_view>
+
 #include "arrow/flight/client.h"
 #include "arrow/flight/server.h"
 #include "common/compiler_util.h"
@@ -27,6 +29,10 @@
 #include "udf/python/python_udf_runtime.h"
 
 namespace doris {
+
+namespace {
+constexpr std::string_view kExchangeErrorMetadataPrefix = "python_server_error:";
+}
 
 Status PythonClient::init(const PythonUDFMeta& func_meta, ProcessPtr process) {
     if (_inited) {
@@ -112,6 +118,29 @@ Status PythonClient::handle_error(arrow::Status status) {
     return Status::RuntimeError(trim(msg));
 }
 
+Status PythonClient::handle_chunk_metadata(const arrow::flight::FlightStreamChunk& chunk) {
+    if (!chunk.app_metadata || chunk.app_metadata->size() == 0) {
+        return Status::OK();
+    }
+
+    std::string_view metadata(reinterpret_cast<const char*>(chunk.app_metadata->data()),
+                              chunk.app_metadata->size());
+    if (metadata.size() < kExchangeErrorMetadataPrefix.size() ||
+        metadata.substr(0, kExchangeErrorMetadataPrefix.size()) != kExchangeErrorMetadataPrefix) {
+        return Status::OK();
+    }
+
+    std::string_view msg = metadata.substr(kExchangeErrorMetadataPrefix.size());
+
+    // Clean up resources
+    _writer.reset();
+    _reader.reset();
+    _begin = false;
+
+    LOG(ERROR) << _operation_name << " error: " << msg;
+    return Status::RuntimeError(trim(msg));
+}
+
 Status PythonClient::begin_stream(const std::shared_ptr<arrow::Schema>& schema) {
     if (UNLIKELY(!_begin)) {
         auto begin_res = _writer->Begin(schema);
@@ -138,6 +167,8 @@ Status PythonClient::read_batch(std::shared_ptr<arrow::RecordBatch>* output) {
     }
 
     arrow::flight::FlightStreamChunk chunk = std::move(*read_res);
+    RETURN_IF_ERROR(handle_chunk_metadata(chunk));
+
     if (!chunk.data) {
         return Status::InternalError("Received null RecordBatch from {} server", _operation_name);
     }

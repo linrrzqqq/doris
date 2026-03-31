@@ -1995,62 +1995,118 @@ class FlightServer(flight.FlightServerBase):
 
         return True
 
+    def _read_first_exchange_chunk(
+        self,
+        reader: flight.MetadataRecordBatchReader,
+    ):
+        """
+        Read the first non-empty request batch before load/init.
+
+        This avoids failing the exchange before the C++ client finishes its initial
+        write, which would otherwise surface as "server disconnect?" instead of the
+        original Python error.
+        """
+        iterator = iter(reader)
+        for chunk in iterator:
+            if not chunk.data:
+                logging.info("Empty chunk received, skipping")
+                continue
+            return chunk, iterator
+        return None, iterator
+
+    def _iter_exchange_chunks(self, first_chunk, iterator):
+        """
+        Yield the consumed first chunk, then the remaining request stream.
+        """
+        yield first_chunk
+        for chunk in iterator:
+            if not chunk.data:
+                logging.info("Empty chunk received, skipping")
+                continue
+            yield chunk
+
     def _handle_exchange_udf(
         self,
         python_udf_meta: PythonUDFMeta,
         reader: flight.MetadataRecordBatchReader,
         writer: flight.MetadataRecordBatchWriter,
     ) -> None:
-        """Handle bidirectional streaming for UDF execution."""
-        loader = UDFLoaderFactory.get_loader(python_udf_meta)
-        udf = loader.load()
-        logging.info("Loaded UDF: %s", udf)
+        """
+        Handle bidirectional streaming for scalar UDF execution.
 
+        Read one request batch before loader.load() so early Python failures are
+        returned through the response path instead of interrupting the client's
+        initial write.
+        """
+        response_schema = pa.schema(
+            [pa.field("result", python_udf_meta.output_type)]
+        )
         started = False
-        for chunk in reader:
-            if not chunk.data:
-                logging.info("Empty chunk received, skipping")
-                continue
+        try:
+            first_chunk, chunk_iterator = self._read_first_exchange_chunk(reader)
+            if first_chunk is None:
+                logging.info("No input chunk received for UDF exchange")
+                return
 
-            check_schema_result, error_msg = self.check_schema(
-                chunk.data, python_udf_meta.input_types
-            )
-            if not check_schema_result:
-                logging.error("Schema mismatch: %s", error_msg)
-                raise ValueError(f"Schema mismatch: {error_msg}")
+            loader = UDFLoaderFactory.get_loader(python_udf_meta)
+            udf = loader.load()
+            logging.info("Loaded UDF: %s", udf)
 
-            result_array = udf(chunk.data)
-
-            if not python_udf_meta.output_type.equals(result_array.type):
-                logging.error(
-                    "Output type mismatch: got %s, expected %s",
-                    result_array.type,
-                    python_udf_meta.output_type,
+            for chunk in self._iter_exchange_chunks(first_chunk, chunk_iterator):
+                check_schema_result, error_msg = self.check_schema(
+                    chunk.data, python_udf_meta.input_types
                 )
-                raise ValueError(
-                    f"Output type mismatch: got {result_array.type}, expected {python_udf_meta.output_type}"
-                )
+                if not check_schema_result:
+                    logging.error("Schema mismatch: %s", error_msg)
+                    raise ValueError(f"Schema mismatch: {error_msg}")
 
-            result_batch = pa.RecordBatch.from_arrays([result_array], ["result"])
-            if not started:
+                result_array = udf(chunk.data)
+
+                if not python_udf_meta.output_type.equals(result_array.type):
+                    logging.error(
+                        "Output type mismatch: got %s, expected %s",
+                        result_array.type,
+                        python_udf_meta.output_type,
+                    )
+                    raise ValueError(
+                        f"Output type mismatch: got {result_array.type}, expected {python_udf_meta.output_type}"
+                    )
+
+                result_batch = pa.RecordBatch.from_arrays(
+                    [result_array], schema=response_schema
+                )
+                if not started:
+                    try:
+                        writer.begin(response_schema)
+                        started = True
+                    except Exception as e:
+                        logging.error(
+                            "Failed to begin UDF writer stream (client may have disconnected): %s",
+                            e,
+                        )
+                        return
+
                 try:
-                    writer.begin(result_batch.schema)
-                    started = True
+                    writer.write_batch(result_batch)
                 except Exception as e:
                     logging.error(
-                        "Failed to begin UDF writer stream (client may have disconnected): %s",
+                        "Failed to write UDF response batch (client may have disconnected): %s",
                         e,
                     )
                     return
-
-            try:
-                writer.write_batch(result_batch)
-            except Exception as e:
-                logging.error(
-                    "Failed to write UDF response batch (client may have disconnected): %s",
-                    e,
-                )
-                return
+        except Exception as e:
+            logging.error(
+                "Error in UDF exchange: %s\nTraceback: %s",
+                e,
+                traceback.format_exc(),
+            )
+            self._write_exchange_error_response(
+                writer,
+                response_schema,
+                f"{type(e).__name__}: {e}",
+                started,
+            )
+            return
 
     def _handle_exchange_udaf(
         self,
@@ -2060,6 +2116,9 @@ class FlightServer(flight.FlightServerBase):
     ) -> None:
         """
         Handle bidirectional streaming for UDAF execution.
+
+        Read one request batch before state init so early failures do not show up
+        on the C++ side as a write-side disconnect.
 
         Protocol (optimized with direct RecordBatch transmission):
         - app_metadata: 30-byte binary structure containing:
@@ -2088,8 +2147,6 @@ class FlightServer(flight.FlightServerBase):
           * FINALIZE: use success + serialized_data (serialized result)
         """
 
-        # Get or create state manager for this specific UDAF function
-        state_manager = self._get_udaf_state_manager(python_udaf_meta)
         started = False
 
         # Define unified response schema (consistent with C++ kUnifiedUDAFResponseSchema)
@@ -2101,191 +2158,212 @@ class FlightServer(flight.FlightServerBase):
             ]
         )
 
-        for chunk in reader:
-            if not chunk.data or chunk.data.num_rows == 0:
-                logging.warning("Empty chunk received, skipping")
-                continue
+        try:
+            first_chunk, chunk_iterator = self._read_first_exchange_chunk(reader)
+            if first_chunk is None:
+                logging.warning("No input chunk received for UDAF exchange")
+                return
 
-            batch = chunk.data
-            app_metadata = chunk.app_metadata
+            # Create/load function state only after one request batch has been
+            # consumed, so early load failures are returned through the response
+            # stream instead of surfacing as client write-side disconnects.
+            state_manager = self._get_udaf_state_manager(python_udaf_meta)
 
-            # Validate app_metadata
-            if not app_metadata or len(app_metadata) != 30:
-                raise ValueError(
-                    f"Invalid app_metadata: expected 30 bytes, got {len(app_metadata) if app_metadata else 0}"
-                )
+            for chunk in self._iter_exchange_chunks(first_chunk, chunk_iterator):
+                if chunk.data.num_rows == 0:
+                    logging.warning("Empty chunk received, skipping")
+                    continue
 
-            # Parse fixed-size binary metadata (30 bytes total)
-            # Layout: meta_version(4) + operation(1) + is_single_place(1) + place_id(8) + row_start(8) + row_end(8)
-            metadata_bytes = app_metadata.to_pybytes()
+                batch = chunk.data
+                app_metadata = chunk.app_metadata
 
-            # Validate metadata version
-            meta_version = int.from_bytes(metadata_bytes[0:4], "little", signed=False)
-            if meta_version != 1:
-                raise ValueError(
-                    f"Unsupported metadata version: {meta_version}. Expected version 1. "
-                    "Please upgrade the Python server or downgrade the C++ client."
-                )
-            operation_type = UDAFOperationType(metadata_bytes[4])
-            is_single_place = metadata_bytes[5] == 1
-            place_id = int.from_bytes(metadata_bytes[6:14], "little", signed=True)
-            row_start = int.from_bytes(metadata_bytes[14:22], "little", signed=True)
-            row_end = int.from_bytes(metadata_bytes[22:30], "little", signed=True)
+                # Validate app_metadata
+                if not app_metadata or len(app_metadata) != 30:
+                    raise ValueError(
+                        f"Invalid app_metadata: expected 30 bytes, got {len(app_metadata) if app_metadata else 0}"
+                    )
 
-            # Extract data from batch
-            # RPC schema: [argument_types..., places: int64, binary_data: binary]
-            # - Second-to-last column is places (int64)
-            # - Last column is binary_data (binary)
-            # - ACCUMULATE (single-place): data columns filled, places is NULL, binary_data is NULL
-            # - ACCUMULATE (multi-place): data columns filled, places contains place IDs, binary_data is NULL
-            # - MERGE: data columns are NULL, places is NULL, binary_data is filled
-            # - Other operations: all columns are NULL
+                # Parse fixed-size binary metadata (30 bytes total)
+                # Layout: meta_version(4) + operation(1) + is_single_place(1) + place_id(8) + row_start(8) + row_end(8)
+                metadata_bytes = app_metadata.to_pybytes()
 
-            if batch.num_columns < 1:
-                raise ValueError(f"Expected at least 1 column, got {batch.num_columns}")
+                # Validate metadata version
+                meta_version = int.from_bytes(metadata_bytes[0:4], "little", signed=False)
+                if meta_version != 1:
+                    raise ValueError(
+                        f"Unsupported metadata version: {meta_version}. Expected version 1. "
+                        "Please upgrade the Python server or downgrade the C++ client."
+                    )
+                operation_type = UDAFOperationType(metadata_bytes[4])
+                is_single_place = metadata_bytes[5] == 1
+                place_id = int.from_bytes(metadata_bytes[6:14], "little", signed=True)
+                row_start = int.from_bytes(metadata_bytes[14:22], "little", signed=True)
+                row_end = int.from_bytes(metadata_bytes[22:30], "little", signed=True)
 
-            # Last column is binary_data
-            binary_col = batch.column(batch.num_columns - 1)
-            binary_data = binary_col[0].as_py() if binary_col[0].is_valid else None
+                # Extract data from batch
+                # RPC schema: [argument_types..., places: int64, binary_data: binary]
+                # - Second-to-last column is places (int64)
+                # - Last column is binary_data (binary)
+                # - ACCUMULATE (single-place): data columns filled, places is NULL, binary_data is NULL
+                # - ACCUMULATE (multi-place): data columns filled, places contains place IDs, binary_data is NULL
+                # - MERGE: data columns are NULL, places is NULL, binary_data is filled
+                # - Other operations: all columns are NULL
 
-            # Handle different operations and convert to unified format
-            try:
-                if operation_type == UDAFOperationType.CREATE:
-                    result_batch = self._handle_udaf_create(place_id, state_manager)
-                    success = result_batch.column(0)[0].as_py()
-                    result_batch = self._create_unified_response(
-                        success=success, rows_processed=0, data=b""
-                    )
-                elif operation_type == UDAFOperationType.ACCUMULATE:
-                    num_data_cols = batch.num_columns - 1
-                    data_batch = pa.RecordBatch.from_arrays(
-                        [batch.column(i) for i in range(num_data_cols)],
-                        schema=pa.schema(
-                            [batch.schema.field(i) for i in range(num_data_cols)]
-                        ),
-                    )
-                    result_batch_accumulate = self._handle_udaf_accumulate(
-                        place_id,
-                        is_single_place,
-                        row_start,
-                        row_end,
-                        data_batch,
-                        state_manager,
-                    )
-                    rows_processed = result_batch_accumulate.column(0)[0].as_py()
-                    result_batch = self._create_unified_response(
-                        success=(rows_processed > 0),
-                        # Processing zero rows is valid for empty fragments/slices.
-                        # Only exceptions should mark ACCUMULATE as failed.
-                        # success=True,
-                        rows_processed=rows_processed,
-                        data=b"",
-                    )
-                elif operation_type == UDAFOperationType.SERIALIZE:
-                    result_batch_serialize = self._handle_udaf_serialize(
-                        place_id, state_manager
-                    )
-                    serialized = result_batch_serialize.column(0)[0].as_py()
-                    result_batch = self._create_unified_response(
-                        success=(len(serialized) > 0) if serialized else False,
-                        rows_processed=0,
-                        data=serialized if serialized else b"",
-                    )
-                elif operation_type == UDAFOperationType.MERGE:
-                    # For MERGE: binary_data contains the serialized state
-                    result_batch_merge = self._handle_udaf_merge(
-                        place_id, binary_data, state_manager
-                    )
-                    success = result_batch_merge.column(0)[0].as_py()
-                    result_batch = self._create_unified_response(
-                        success=success, rows_processed=0, data=b""
-                    )
-                elif operation_type == UDAFOperationType.FINALIZE:
-                    result_batch_finalize = self._handle_udaf_finalize(
-                        place_id, python_udaf_meta.output_type, state_manager
-                    )
-                    # Serialize the result to binary (including NULL results)
-                    # NULL is a valid aggregation result, not an error
-                    sink = pa.BufferOutputStream()
-                    ipc_writer = pa.ipc.new_stream(sink, result_batch_finalize.schema)
-                    ipc_writer.write_batch(result_batch_finalize)
-                    ipc_writer.close()
-                    result_data = sink.getvalue().to_pybytes()
-                    result_batch = self._create_unified_response(
-                        success=True,
-                        rows_processed=0,
-                        data=result_data,
-                    )
-                elif operation_type == UDAFOperationType.RESET:
-                    result_batch_reset = self._handle_udaf_reset(
-                        place_id, state_manager
-                    )
-                    success = result_batch_reset.column(0)[0].as_py()
-                    result_batch = self._create_unified_response(
-                        success=success, rows_processed=0, data=b""
-                    )
-                elif operation_type == UDAFOperationType.DESTROY:
-                    if row_end > 1:
-                        # Batch destroy mode - binary_data contains serialized place_ids
-                        if binary_data is None:
-                            raise ValueError("DESTROY_BATCH: binary_data is None")
-                        data_reader = pa.ipc.open_stream(binary_data)
-                        data_batch = data_reader.read_next_batch()
-                        if data_batch.num_columns != 1:
-                            raise ValueError(
-                                f"DESTROY_BATCH: Expected 1 column (place_ids), got {data_batch.num_columns}"
-                            )
-                        place_ids_array = data_batch.column(0)
-                        place_ids = [
-                            place_ids_array[i].as_py()
-                            for i in range(len(place_ids_array))
-                        ]
-                    else:
-                        # Single destroy mode
-                        place_ids = [place_id]
+                if batch.num_columns < 1:
+                    raise ValueError(f"Expected at least 1 column, got {batch.num_columns}")
 
-                    success = self._handle_udaf_destroy(place_ids, state_manager)
-                    result_batch = self._create_unified_response(
-                        success=success, rows_processed=0, data=b""
-                    )
-                else:
-                    raise ValueError(f"Unsupported operation type: {operation_type}")
-            except Exception as e:
-                logging.error(
-                    "Operation %s failed for place_id=%s: %s\nTraceback: %s",
-                    operation_type,
-                    place_id,
-                    e,
-                    traceback.format_exc(),
-                )
-                result_batch = self._create_unified_response(
-                    success=False, rows_processed=0, data=b""
-                )
+                # Last column is binary_data
+                binary_col = batch.column(batch.num_columns - 1)
+                binary_data = binary_col[0].as_py() if binary_col[0].is_valid else None
 
-            # Begin stream with unified schema on first call
-            if not started:
+                # Handle different operations and convert to unified format
                 try:
-                    writer.begin(unified_schema)
-                    started = True
+                    if operation_type == UDAFOperationType.CREATE:
+                        result_batch = self._handle_udaf_create(place_id, state_manager)
+                        success = result_batch.column(0)[0].as_py()
+                        result_batch = self._create_unified_response(
+                            success=success, rows_processed=0, data=b""
+                        )
+                    elif operation_type == UDAFOperationType.ACCUMULATE:
+                        num_data_cols = batch.num_columns - 1
+                        data_batch = pa.RecordBatch.from_arrays(
+                            [batch.column(i) for i in range(num_data_cols)],
+                            schema=pa.schema(
+                                [batch.schema.field(i) for i in range(num_data_cols)]
+                            ),
+                        )
+                        result_batch_accumulate = self._handle_udaf_accumulate(
+                            place_id,
+                            is_single_place,
+                            row_start,
+                            row_end,
+                            data_batch,
+                            state_manager,
+                        )
+                        rows_processed = result_batch_accumulate.column(0)[0].as_py()
+                        result_batch = self._create_unified_response(
+                            success=(rows_processed > 0),
+                            rows_processed=rows_processed,
+                            data=b"",
+                        )
+                    elif operation_type == UDAFOperationType.SERIALIZE:
+                        result_batch_serialize = self._handle_udaf_serialize(
+                            place_id, state_manager
+                        )
+                        serialized = result_batch_serialize.column(0)[0].as_py()
+                        result_batch = self._create_unified_response(
+                            success=(len(serialized) > 0) if serialized else False,
+                            rows_processed=0,
+                            data=serialized if serialized else b"",
+                        )
+                    elif operation_type == UDAFOperationType.MERGE:
+                        # For MERGE: binary_data contains the serialized state
+                        result_batch_merge = self._handle_udaf_merge(
+                            place_id, binary_data, state_manager
+                        )
+                        success = result_batch_merge.column(0)[0].as_py()
+                        result_batch = self._create_unified_response(
+                            success=success, rows_processed=0, data=b""
+                        )
+                    elif operation_type == UDAFOperationType.FINALIZE:
+                        result_batch_finalize = self._handle_udaf_finalize(
+                            place_id, python_udaf_meta.output_type, state_manager
+                        )
+                        # Serialize the result to binary (including NULL results)
+                        # NULL is a valid aggregation result, not an error
+                        sink = pa.BufferOutputStream()
+                        ipc_writer = pa.ipc.new_stream(sink, result_batch_finalize.schema)
+                        ipc_writer.write_batch(result_batch_finalize)
+                        ipc_writer.close()
+                        result_data = sink.getvalue().to_pybytes()
+                        result_batch = self._create_unified_response(
+                            success=True,
+                            rows_processed=0,
+                            data=result_data,
+                        )
+                    elif operation_type == UDAFOperationType.RESET:
+                        result_batch_reset = self._handle_udaf_reset(
+                            place_id, state_manager
+                        )
+                        success = result_batch_reset.column(0)[0].as_py()
+                        result_batch = self._create_unified_response(
+                            success=success, rows_processed=0, data=b""
+                        )
+                    elif operation_type == UDAFOperationType.DESTROY:
+                        if row_end > 1:
+                            # Batch destroy mode - binary_data contains serialized place_ids
+                            if binary_data is None:
+                                raise ValueError("DESTROY_BATCH: binary_data is None")
+                            data_reader = pa.ipc.open_stream(binary_data)
+                            data_batch = data_reader.read_next_batch()
+                            if data_batch.num_columns != 1:
+                                raise ValueError(
+                                    f"DESTROY_BATCH: Expected 1 column (place_ids), got {data_batch.num_columns}"
+                                )
+                            place_ids_array = data_batch.column(0)
+                            place_ids = [
+                                place_ids_array[i].as_py()
+                                for i in range(len(place_ids_array))
+                            ]
+                        else:
+                            # Single destroy mode
+                            place_ids = [place_id]
+
+                        success = self._handle_udaf_destroy(place_ids, state_manager)
+                        result_batch = self._create_unified_response(
+                            success=success, rows_processed=0, data=b""
+                        )
+                    else:
+                        raise ValueError(f"Unsupported operation type: {operation_type}")
                 except Exception as e:
                     logging.error(
-                        "Failed to begin writer stream (client may have disconnected): %s",
+                        "Operation %s failed for place_id=%s: %s\nTraceback: %s",
+                        operation_type,
+                        place_id,
+                        e,
+                        traceback.format_exc(),
+                    )
+                    result_batch = self._create_unified_response(
+                        success=False, rows_processed=0, data=b""
+                    )
+
+                # Begin stream with unified schema on first call
+                if not started:
+                    try:
+                        writer.begin(unified_schema)
+                        started = True
+                    except Exception as e:
+                        logging.error(
+                            "Failed to begin writer stream (client may have disconnected): %s",
+                            e,
+                        )
+                        # Client disconnected, stop processing
+                        return
+
+                try:
+                    writer.write_batch(result_batch)
+                except Exception as e:
+                    logging.error(
+                        "Failed to write response batch (client may have disconnected): %s",
                         e,
                     )
                     # Client disconnected, stop processing
                     return
 
-            try:
-                writer.write_batch(result_batch)
-            except Exception as e:
-                logging.error(
-                    "Failed to write response batch (client may have disconnected): %s",
-                    e,
-                )
-                # Client disconnected, stop processing
-                return
-
-            del result_batch
+                del result_batch
+        except Exception as e:
+            logging.error(
+                "Error in UDAF exchange: %s\nTraceback: %s",
+                e,
+                traceback.format_exc(),
+            )
+            self._write_exchange_error_response(
+                writer,
+                unified_schema,
+                f"{type(e).__name__}: {e}",
+                started,
+            )
+            return
 
     def _handle_exchange_udtf(
         self,
@@ -2295,6 +2373,9 @@ class FlightServer(flight.FlightServerBase):
     ) -> None:
         """
         Handle bidirectional streaming for UDTF execution.
+
+        Read one request batch before loader.load() so forbidden-module/import
+        failures are reported as Python errors instead of write-side disconnects.
 
         Protocol (ListArray-based):
         - Input: RecordBatch with input columns
@@ -2310,36 +2391,38 @@ class FlightServer(flight.FlightServerBase):
             - Element 1: List of 2 structs
             - Element 2: List of 3 structs
         """
-        loader = UDFLoaderFactory.get_loader(python_udtf_meta)
-        adaptive_udtf = loader.load()
-        udtf_func = adaptive_udtf._eval_func
+        response_schema = pa.schema(
+            [pa.field("results", pa.list_(python_udtf_meta.output_type))]
+        )
         started = False
+        try:
+            first_chunk, chunk_iterator = self._read_first_exchange_chunk(reader)
+            if first_chunk is None:
+                logging.info("No input chunk received for UDTF exchange")
+                return
 
-        for chunk in reader:
-            if not chunk.data:
-                logging.info("Empty chunk received, skipping")
-                continue
+            loader = UDFLoaderFactory.get_loader(python_udtf_meta)
+            adaptive_udtf = loader.load()
+            udtf_func = adaptive_udtf._eval_func
 
-            input_batch = chunk.data
+            for chunk in self._iter_exchange_chunks(first_chunk, chunk_iterator):
+                input_batch = chunk.data
 
-            # Validate input schema
-            check_schema_result, error_msg = self.check_schema(
-                input_batch, python_udtf_meta.input_types
-            )
-            if not check_schema_result:
-                logging.error("Schema mismatch: %s", error_msg)
-                raise ValueError(f"Schema mismatch: {error_msg}")
+                # Validate input schema
+                check_schema_result, error_msg = self.check_schema(
+                    input_batch, python_udtf_meta.input_types
+                )
+                if not check_schema_result:
+                    logging.error("Schema mismatch: %s", error_msg)
+                    raise ValueError(f"Schema mismatch: {error_msg}")
 
-            # Process all input rows and build ListArray
-            try:
                 response_batch = self._process_udtf_with_list_array(
                     udtf_func, input_batch, python_udtf_meta.output_type
                 )
 
-                # Send the response batch
                 if not started:
                     try:
-                        writer.begin(response_batch.schema)
+                        writer.begin(response_schema)
                         started = True
                     except Exception as e:
                         logging.error(
@@ -2356,14 +2439,19 @@ class FlightServer(flight.FlightServerBase):
                         e,
                     )
                     return
-
-            except Exception as e:
-                logging.error(
-                    "Error in UDTF execution: %s\nTraceback: %s",
-                    e,
-                    traceback.format_exc(),
-                )
-                raise RuntimeError(f"Error in UDTF execution: {e}") from e
+        except Exception as e:
+            logging.error(
+                "Error in UDTF execution: %s\nTraceback: %s",
+                e,
+                traceback.format_exc(),
+            )
+            self._write_exchange_error_response(
+                writer,
+                response_schema,
+                f"{type(e).__name__}: {e}",
+                started,
+            )
+            return
 
     def _process_udtf_with_list_array(
         self,
@@ -2472,6 +2560,31 @@ class FlightServer(flight.FlightServerBase):
         response_batch = pa.RecordBatch.from_arrays([list_array], schema=schema)
 
         return response_batch
+
+    def _write_exchange_error_response(
+        self,
+        writer: flight.MetadataRecordBatchWriter,
+        schema: pa.Schema,
+        error_message: str,
+        started: bool,
+    ) -> None:
+        """Send an application-level error as metadata on a normal Flight batch."""
+        try:
+            if not started:
+                writer.begin(schema)
+
+            empty_arrays = [pa.array([], type=field.type) for field in schema]
+            empty_batch = pa.RecordBatch.from_arrays(empty_arrays, schema=schema)
+            writer.write_with_metadata(
+                empty_batch,
+                pa.py_buffer(f"python_server_error:{error_message}".encode("utf-8")),
+            )
+        except Exception as send_error:
+            logging.error(
+                "Failed to send exchange error response: %s (original error: %s)",
+                send_error,
+                error_message,
+            )
 
     def do_exchange(
         self,

@@ -81,6 +81,13 @@ public:
 
 protected:
     /**
+     * Check whether a Flight chunk carries application-level error metadata.
+     * @param chunk Flight response chunk
+     * @return RuntimeError if metadata encodes a Python-side business error
+     */
+    Status handle_chunk_metadata(const arrow::flight::FlightStreamChunk& chunk);
+
+    /**
      * Begin Flight stream with schema (called only once per stream)
      * @param schema Input schema
      * @return Status
