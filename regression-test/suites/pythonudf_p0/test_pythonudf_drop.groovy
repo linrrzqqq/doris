@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-suite("test_pythonudf_drop") {
+suite("test_pythonudf_drop", "nonConcurrent") {
     def runtime_version = getPythonUdfRuntimeVersion()
     def zipA = """${context.file.parent}/udf_scripts/python_udf_drop_a/python_udf_drop_test.zip"""
     def zipB = """${context.file.parent}/udf_scripts/python_udf_drop_b/python_udf_drop_test.zip"""
@@ -88,9 +88,33 @@ suite("test_pythonudf_drop") {
             sql """SELECT py_drop_a(1);"""
             exception "Can not found function"
         }
+
+        // Case 3: kill Python servers between two queries, next client handshake should recover
+        sql """DROP FUNCTION IF EXISTS py_drop_reconnect(INT)"""
+        sql """
+            CREATE FUNCTION py_drop_reconnect(INT) RETURNS INT PROPERTIES (
+                "type" = "PYTHON_UDF",
+                "file" = "file://${zipA}",
+                "symbol" = "drop_udf.evaluate",
+                "runtime_version" = "${runtime_version}"
+            )
+        """
+
+        qt_py_udf_drop_4 """SELECT py_drop_reconnect(31);"""
+
+        backendId_to_backendIP.values().each { be_ip ->
+            execOnBackend(
+                be_ip,
+                "pkill -f 'python_server.py grpc+unix:///tmp/doris_python_udf' || true",
+                "pkill -f 'python_server.py grpc+unix:///tmp/doris_python_udf' || true")
+        }
+
+        qt_py_udf_drop_5 """SELECT py_drop_reconnect(32);"""
+        try_sql("DROP FUNCTION IF EXISTS py_drop_reconnect(INT);")
     } finally {
         try_sql("DROP FUNCTION IF EXISTS py_drop_once(INT);")
         try_sql("DROP FUNCTION IF EXISTS py_drop_a(INT);")
         try_sql("DROP FUNCTION IF EXISTS py_drop_b(INT);")
+        try_sql("DROP FUNCTION IF EXISTS py_drop_reconnect(INT);")
     }
 }

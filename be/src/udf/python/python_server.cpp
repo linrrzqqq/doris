@@ -125,14 +125,53 @@ Status PythonServerManager::get_process(const PythonVersion& version, ProcessPtr
                                      version.to_string());
     }
 
-    // Find process with minimum load (use_count - 1 gives active client count)
-    auto min_iter = std::min_element(
-            pool.begin(), pool.end(),
-            [](const ProcessPtr& a, const ProcessPtr& b) { return a.use_count() < b.use_count(); });
+    // Prefer an already-alive process and only use load balancing inside that alive subset.
+    // keep dead entries stay in the pool for the background health checker
+    // unless there is no alive process left for the current request.
+    auto min_alive_iter = std::min_element(pool.begin(), pool.end(),
+                                           [](const ProcessPtr& a, const ProcessPtr& b) {
+                                               const bool a_alive = a && a->is_alive();
+                                               const bool b_alive = b && b->is_alive();
+                                               if (a_alive != b_alive) {
+                                                   return a_alive > b_alive;
+                                               }
+                                               if (!a_alive) {
+                                                   return false;
+                                               }
+                                               return a.use_count() < b.use_count();
+                                           });
 
-    // Return process with minimum load
-    *process = *min_iter;
-    return Status::OK();
+    if (min_alive_iter != pool.end() && *min_alive_iter && (*min_alive_iter)->is_alive()) {
+        *process = *min_alive_iter;
+        return Status::OK();
+    }
+
+    // Only reach here when the pool has no alive process at all. In that fallback path we
+    // rebuild one process so the caller can still make progress instead of waiting
+    // for the next health-check round.
+    for (size_t i = 0; i < pool.size(); ++i) {
+        auto& candidate = pool[i];
+        ProcessPtr replacement;
+        Status status = fork(version, &replacement);
+        if (!status.ok()) {
+            if (candidate) {
+                LOG(WARNING) << "Failed to recreate unavailable Python process (pid="
+                             << candidate->get_child_pid() << ", version=" << version.to_string()
+                             << "): " << status.to_string();
+            } else {
+                LOG(WARNING) << "Failed to create Python process for empty slot, version="
+                             << version.to_string() << ": " << status.to_string();
+            }
+            continue;
+        }
+
+        pool[i] = replacement;
+        *process = std::move(replacement);
+        return Status::OK();
+    }
+
+    return Status::InternalError("Python process pool has no available process for version {}",
+                                 version.to_string());
 }
 
 Status PythonServerManager::fork(const PythonVersion& version, ProcessPtr* process) {
