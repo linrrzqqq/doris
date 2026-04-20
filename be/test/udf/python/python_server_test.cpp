@@ -417,6 +417,69 @@ TEST_F(PythonServerTest, GetProcessFromInitializedPool) {
     mgr.shutdown();
 }
 
+TEST_F(PythonServerTest, GetProcessRecreatesDeadProcessWhenNoAliveProcess) {
+    setup_doris_home();
+    std::string python_path = create_fake_python_with_socket_creation("3.9.16");
+
+    config::max_python_process_num = 1;
+
+    PythonServerManager mgr;
+    PythonVersion version("3.9.16", test_dir_, python_path);
+
+    ASSERT_TRUE(mgr.ensure_pool_initialized(version).ok());
+
+    ProcessPtr first_process;
+    ASSERT_TRUE(mgr.get_process(version, &first_process).ok());
+    ASSERT_NE(first_process, nullptr);
+    ASSERT_TRUE(first_process->is_alive());
+    pid_t first_pid = first_process->get_child_pid();
+
+    first_process->shutdown();
+    ASSERT_FALSE(first_process->is_alive());
+
+    ProcessPtr replacement;
+    Status status = mgr.get_process(version, &replacement);
+
+    EXPECT_TRUE(status.ok()) << status.to_string();
+    ASSERT_NE(replacement, nullptr);
+    EXPECT_TRUE(replacement->is_alive());
+    EXPECT_NE(replacement->get_child_pid(), first_pid);
+
+    mgr.shutdown();
+}
+
+TEST_F(PythonServerTest, GetProcessSkipsDeadProcessWhenAliveProcessExists) {
+    setup_doris_home();
+    std::string python_path = create_fake_python_with_socket_creation("3.9.16");
+
+    PythonServerManager mgr;
+    PythonVersion version("3.9.16", test_dir_, python_path);
+
+    ProcessPtr alive_process;
+    ASSERT_TRUE(mgr.fork(version, &alive_process).ok());
+    ASSERT_NE(alive_process, nullptr);
+    ASSERT_TRUE(alive_process->is_alive());
+
+    ProcessPtr dead_process;
+    ASSERT_TRUE(mgr.fork(version, &dead_process).ok());
+    ASSERT_NE(dead_process, nullptr);
+    pid_t dead_pid = dead_process->get_child_pid();
+    dead_process->shutdown();
+    ASSERT_FALSE(dead_process->is_alive());
+
+    mgr.process_pools_for_test()[version] = {alive_process, dead_process};
+
+    ProcessPtr selected;
+    Status status = mgr.get_process(version, &selected);
+
+    EXPECT_TRUE(status.ok()) << status.to_string();
+    EXPECT_EQ(selected, alive_process);
+    EXPECT_FALSE(mgr.process_pools_for_test()[version][1]->is_alive());
+    EXPECT_EQ(mgr.process_pools_for_test()[version][1]->get_child_pid(), dead_pid);
+
+    mgr.shutdown();
+}
+
 TEST_F(PythonServerTest, GetProcessLoadBalancing) {
     setup_doris_home();
     std::string python_path = create_fake_python_with_socket_creation("3.9.16");
