@@ -24,6 +24,8 @@ import org.apache.doris.common.FeConstants;
 import org.apache.doris.common.jmockit.Deencapsulation;
 import org.apache.doris.nereids.StatementContext;
 import org.apache.doris.nereids.parser.NereidsParser;
+import org.apache.doris.nereids.trees.expressions.functions.FunctionBuilder;
+import org.apache.doris.nereids.trees.expressions.functions.udf.JavaUdf;
 import org.apache.doris.nereids.trees.plans.commands.CreateDatabaseCommand;
 import org.apache.doris.nereids.trees.plans.commands.CreateFunctionCommand;
 import org.apache.doris.nereids.trees.plans.commands.CreateTableCommand;
@@ -43,6 +45,7 @@ import org.junit.BeforeClass;
 import org.junit.Test;
 
 import java.io.File;
+import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
 
@@ -52,6 +55,12 @@ import java.util.UUID;
  */
 
 public class CreateFunctionTest {
+
+    public static class TestConstantUdf {
+        public Integer evaluate() {
+            return 1;
+        }
+    }
 
     private static String runningDir = "fe/mocked/CreateFunctionTest/" + UUID.randomUUID().toString() + "/";
     private static ConnectContext connectContext;
@@ -148,6 +157,47 @@ public class CreateFunctionTest {
         Assert.assertTrue(containsIgnoreCase(dorisAssert.query(queryStr).explainQuery(),
                 "concat(left(CAST(CAST(k1 as BIGINT) AS VARCHAR(65533)), 3), '****',"
                         + " right(CAST(CAST(k1 AS BIGINT) AS VARCHAR(65533)), 4))"));
+    }
+
+    @Test
+    public void testCreateJavaUdfDeterministicProperty() throws Exception {
+        ConnectContext ctx = UtFrameUtils.createDefaultCtx();
+        createDatabase(ctx, "create database db_det;");
+
+        createFunction("CREATE FUNCTION db_det.default_det() RETURNS int PROPERTIES (\n"
+                + "  \"symbol\"=\"" + TestConstantUdf.class.getName() + "\",\n"
+                + "  \"type\"=\"JAVA_UDF\"\n"
+                + ");", ctx);
+
+        createFunction("CREATE FUNCTION db_det.explicit_det() RETURNS int PROPERTIES (\n"
+                + "  \"symbol\"=\"" + TestConstantUdf.class.getName() + "\",\n"
+                + "  \"type\"=\"JAVA_UDF\",\n"
+                + "  \"deterministic\"=\"true\"\n"
+                + ");", ctx);
+
+        Database db = Env.getCurrentInternalCatalog().getDbNullable("db_det");
+        Assert.assertNotNull(db);
+
+        Function defaultFn = db.getFunction(
+                new FunctionSearchDesc(new FunctionName("db_det", "default_det"), new Type[] {}, false));
+        Function explicitFn = db.getFunction(
+                new FunctionSearchDesc(new FunctionName("db_det", "explicit_det"), new Type[] {}, false));
+
+        Assert.assertNotNull(defaultFn);
+        Assert.assertNotNull(explicitFn);
+        Assert.assertFalse(defaultFn.isDeterministic());
+        Assert.assertTrue(explicitFn.isDeterministic());
+
+        FunctionRegistry functionRegistry = Env.getCurrentEnv().getFunctionRegistry();
+        FunctionBuilder defaultBuilder = functionRegistry.findFunctionBuilder(
+                "db_det", "default_det", Collections.emptyList());
+        FunctionBuilder explicitBuilder = functionRegistry.findFunctionBuilder(
+                "db_det", "explicit_det", Collections.emptyList());
+
+        JavaUdf defaultNereidsFn = (JavaUdf) defaultBuilder.build("default_det", Collections.emptyList()).first;
+        JavaUdf explicitNereidsFn = (JavaUdf) explicitBuilder.build("explicit_det", Collections.emptyList()).first;
+        Assert.assertFalse(defaultNereidsFn.isDeterministic());
+        Assert.assertTrue(explicitNereidsFn.isDeterministic());
     }
 
     private void testFunctionQuery(ConnectContext ctx, String queryStr, Boolean isStringLiteral) throws Exception {

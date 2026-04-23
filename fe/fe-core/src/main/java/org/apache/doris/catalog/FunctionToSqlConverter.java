@@ -75,6 +75,13 @@ public class FunctionToSqlConverter {
                     .append("\"" + (fn.getLocation() == null ? "" : fn.getLocation().toString()) + "\"");
             boolean isReturnNull = fn.getNullableMode() == NullableMode.ALWAYS_NULLABLE;
             sb.append(",\n  \"ALWAYS_NULLABLE\"=").append("\"" + isReturnNull + "\"");
+            sb.append(",\n  \"DETERMINISTIC\"=").append("\"" + fn.isDeterministic() + "\"");
+        } else if (fn.getBinaryType() == Function.BinaryType.PYTHON_UDF) {
+            sb.append(",\n  \"FILE\"=")
+                    .append("\"" + (fn.getLocation() == null ? "" : fn.getLocation().toString()) + "\"");
+            boolean isReturnNull = fn.getNullableMode() == NullableMode.ALWAYS_NULLABLE;
+            sb.append(",\n  \"ALWAYS_NULLABLE\"=").append("\"" + isReturnNull + "\"");
+            sb.append(",\n  \"DETERMINISTIC\"=").append("\"" + fn.isDeterministic() + "\"");
         } else {
             sb.append(",\n  \"OBJECT_FILE\"=")
                     .append("\"" + (fn.getLocation() == null ? "" : fn.getLocation().toString()) + "\"");
@@ -125,6 +132,13 @@ public class FunctionToSqlConverter {
                     .append("\"" + (fn.getLocation() == null ? "" : fn.getLocation().toString()) + "\",");
             boolean isReturnNull = fn.getNullableMode() == NullableMode.ALWAYS_NULLABLE;
             sb.append("\n  \"ALWAYS_NULLABLE\"=").append("\"" + isReturnNull + "\",");
+            sb.append("\n  \"DETERMINISTIC\"=").append("\"" + fn.isDeterministic() + "\",");
+        } else if (fn.getBinaryType() == Function.BinaryType.PYTHON_UDF) {
+            sb.append("\n  \"FILE\"=")
+                    .append("\"" + (fn.getLocation() == null ? "" : fn.getLocation().toString()) + "\",");
+            boolean isReturnNull = fn.getNullableMode() == NullableMode.ALWAYS_NULLABLE;
+            sb.append("\n  \"ALWAYS_NULLABLE\"=").append("\"" + isReturnNull + "\",");
+            sb.append("\n  \"DETERMINISTIC\"=").append("\"" + fn.isDeterministic() + "\",");
         } else {
             sb.append("\n  \"OBJECT_FILE\"=")
                     .append("\"" + (fn.getLocation() == null ? "" : fn.getLocation().toString()) + "\",");

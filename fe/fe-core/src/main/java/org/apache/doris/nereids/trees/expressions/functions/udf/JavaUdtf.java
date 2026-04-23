@@ -56,6 +56,7 @@ public class JavaUdtf extends TableGeneratingFunction implements ExplicitlyCasta
     private final String checkSum;
     private final boolean isStaticLoad;
     private final long expirationTime;
+    private final boolean deterministic;
 
     /**
      * Constructor of UDTF
@@ -63,7 +64,7 @@ public class JavaUdtf extends TableGeneratingFunction implements ExplicitlyCasta
     public JavaUdtf(String name, long functionId, String dbName, Function.BinaryType binaryType,
             FunctionSignature signature,
             NullableMode nullableMode, String objectFile, String symbol, String prepareFn, String closeFn,
-            String checkSum, boolean isStaticLoad, long expirationTime, Expression... args) {
+            String checkSum, boolean isStaticLoad, long expirationTime, boolean deterministic, Expression... args) {
         super(name, args);
         this.dbName = dbName;
         this.functionId = functionId;
@@ -77,6 +78,7 @@ public class JavaUdtf extends TableGeneratingFunction implements ExplicitlyCasta
         this.checkSum = checkSum;
         this.isStaticLoad = isStaticLoad;
         this.expirationTime = expirationTime;
+        this.deterministic = deterministic;
     }
 
     /**
@@ -86,13 +88,18 @@ public class JavaUdtf extends TableGeneratingFunction implements ExplicitlyCasta
     public JavaUdtf withChildren(List<Expression> children) {
         Preconditions.checkArgument(children.size() == this.children.size());
         return new JavaUdtf(getName(), functionId, dbName, binaryType, signature, nullableMode,
-                objectFile, symbol, prepareFn, closeFn, checkSum, isStaticLoad, expirationTime,
+                objectFile, symbol, prepareFn, closeFn, checkSum, isStaticLoad, expirationTime, deterministic,
                 children.toArray(new Expression[0]));
     }
 
     @Override
     public List<FunctionSignature> getSignatures() {
         return ImmutableList.of(signature);
+    }
+
+    @Override
+    public boolean isDeterministic() {
+        return deterministic;
     }
 
     @Override
@@ -125,6 +132,7 @@ public class JavaUdtf extends TableGeneratingFunction implements ExplicitlyCasta
             expr.setStaticLoad(isStaticLoad);
             expr.setExpirationTime(expirationTime);
             expr.setUDTFunction(true);
+            expr.setDeterministic(deterministic);
             return expr;
         } catch (Exception e) {
             throw new AnalysisException(e.getMessage(), e.getCause());
@@ -159,6 +167,7 @@ public class JavaUdtf extends TableGeneratingFunction implements ExplicitlyCasta
                 scalar.getChecksum(),
                 scalar.isStaticLoad(),
                 scalar.getExpirationTime(),
+                scalar.isDeterministic(),
                 arguments);
 
         JavaUdtfBuilder builder = new JavaUdtfBuilder(udf);

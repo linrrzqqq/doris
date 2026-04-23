@@ -71,7 +71,8 @@ suite("test_expand_star_mtmv","mtmv") {
         DISTRIBUTED BY RANDOM BUCKETS 2
         PROPERTIES (
         'replication_num' = '1',
-        'version_info'='3'
+        'version_info'='3',
+        'enable_nondeterministic_function' = 'true'
         )
         AS
         SELECT ${functionName} ('2011-01-01','2011-01-03') as k1 from ${tableName};

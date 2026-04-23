@@ -147,6 +147,7 @@ public class CreateFunctionCommand extends Command implements ForwardWithSync {
     public static final String IS_STATIC_LOAD = "static_load";
     public static final String EXPIRATION_TIME = "expiration_time";
     public static final String RUNTIME_VERSION = "runtime_version";
+    public static final String IS_DETERMINISTIC = "deterministic";
 
     private static final Pattern PYTHON_VERSION_PATTERN = Pattern.compile("^3\\.\\d{1,2}(?:\\.\\d{1,2})?$");
     private static final Logger LOG = LogManager.getLogger(CreateFunctionCommand.class);
@@ -179,6 +180,7 @@ public class CreateFunctionCommand extends Command implements ForwardWithSync {
     private NullableMode returnNullMode = NullableMode.ALWAYS_NULLABLE;
     private String runtimeVersion;
     private String functionCode;
+    private boolean deterministic = false;
 
     /**
      * CreateFunctionCommand
@@ -366,6 +368,12 @@ public class CreateFunctionCommand extends Command implements ForwardWithSync {
             }
             runtimeVersion = runtimeVersionString;
         }
+        if (binaryType == Function.BinaryType.JAVA_UDF || binaryType == Function.BinaryType.PYTHON_UDF) {
+            Boolean deterministicProperty = parseBooleanFromProperties(IS_DETERMINISTIC);
+            if (deterministicProperty != null) {
+                deterministic = deterministicProperty;
+            }
+        }
     }
 
     private void extractExpirationTime() throws AnalysisException {
@@ -476,6 +484,7 @@ public class CreateFunctionCommand extends Command implements ForwardWithSync {
         function.setUDTFunction(true);
         function.setRuntimeVersion(runtimeVersion);
         function.setFunctionCode(functionCode);
+        function.setDeterministic(deterministic);
         // Todo: maybe in create tables function, need register two function, one is
         // normal and one is outer as those have different result when result is NULL.
     }
@@ -550,6 +559,7 @@ public class CreateFunctionCommand extends Command implements ForwardWithSync {
         function.setExpirationTime(expirationTime);
         function.setRuntimeVersion(runtimeVersion);
         function.setFunctionCode(functionCode);
+        function.setDeterministic(deterministic);
     }
 
     private void analyzeUdf() throws AnalysisException {
@@ -587,6 +597,7 @@ public class CreateFunctionCommand extends Command implements ForwardWithSync {
         function.setExpirationTime(expirationTime);
         function.setRuntimeVersion(runtimeVersion);
         function.setFunctionCode(functionCode);
+        function.setDeterministic(deterministic);
     }
 
     private void analyzeJavaUdaf(String clazz) throws AnalysisException {

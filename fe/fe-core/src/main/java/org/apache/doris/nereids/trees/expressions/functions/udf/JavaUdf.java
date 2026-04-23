@@ -56,6 +56,7 @@ public class JavaUdf extends ScalarFunction implements ExplicitlyCastableSignatu
     private final String checkSum;
     private final boolean isStaticLoad;
     private final long expirationTime;
+    private final boolean deterministic;
 
     /**
      * Constructor of UDF
@@ -63,7 +64,7 @@ public class JavaUdf extends ScalarFunction implements ExplicitlyCastableSignatu
     public JavaUdf(String name, long functionId, String dbName, Function.BinaryType binaryType,
             FunctionSignature signature,
             NullableMode nullableMode, String objectFile, String symbol, String prepareFn, String closeFn,
-            String checkSum, boolean isStaticLoad, long expirationTime, Expression... args) {
+            String checkSum, boolean isStaticLoad, long expirationTime, boolean deterministic, Expression... args) {
         super(name, args);
         this.dbName = dbName;
         this.functionId = functionId;
@@ -77,6 +78,7 @@ public class JavaUdf extends ScalarFunction implements ExplicitlyCastableSignatu
         this.checkSum = checkSum;
         this.isStaticLoad = isStaticLoad;
         this.expirationTime = expirationTime;
+        this.deterministic = deterministic;
     }
 
     @Override
@@ -99,6 +101,11 @@ public class JavaUdf extends ScalarFunction implements ExplicitlyCastableSignatu
         return nullableMode;
     }
 
+    @Override
+    public boolean isDeterministic() {
+        return deterministic;
+    }
+
     /**
      * withChildren.
      */
@@ -106,7 +113,7 @@ public class JavaUdf extends ScalarFunction implements ExplicitlyCastableSignatu
     public JavaUdf withChildren(List<Expression> children) {
         Preconditions.checkArgument(children.size() == this.children.size());
         return new JavaUdf(getName(), functionId, dbName, binaryType, signature, nullableMode,
-                objectFile, symbol, prepareFn, closeFn, checkSum, isStaticLoad, expirationTime,
+                objectFile, symbol, prepareFn, closeFn, checkSum, isStaticLoad, expirationTime, deterministic,
                 children.toArray(new Expression[0]));
     }
 
@@ -135,7 +142,7 @@ public class JavaUdf extends ScalarFunction implements ExplicitlyCastableSignatu
                 scalar.getSymbolName(),
                 scalar.getPrepareFnSymbol(),
                 scalar.getCloseFnSymbol(),
-                scalar.getChecksum(), scalar.isStaticLoad(), scalar.getExpirationTime(),
+                scalar.getChecksum(), scalar.isStaticLoad(), scalar.getExpirationTime(), scalar.isDeterministic(),
                 arguments);
 
         JavaUdfBuilder builder = new JavaUdfBuilder(udf);
@@ -166,6 +173,7 @@ public class JavaUdf extends ScalarFunction implements ExplicitlyCastableSignatu
             expr.setId(functionId);
             expr.setStaticLoad(isStaticLoad);
             expr.setExpirationTime(expirationTime);
+            expr.setDeterministic(deterministic);
             return expr;
         } catch (Exception e) {
             throw new AnalysisException(e.getMessage(), e.getCause());

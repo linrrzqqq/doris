@@ -58,6 +58,7 @@ public class PythonUdf extends ScalarFunction implements ExplicitlyCastableSigna
     private final long expirationTime;
     private final String runtimeVersion;
     private final String functionCode;
+    private final boolean deterministic;
 
     /**
      * Constructor of UDF
@@ -66,7 +67,7 @@ public class PythonUdf extends ScalarFunction implements ExplicitlyCastableSigna
                      FunctionSignature signature,
                      NullableMode nullableMode, String objectFile, String symbol, String prepareFn, String closeFn,
                      String checkSum, boolean isStaticLoad, long expirationTime,
-                     String runtimeVersion, String functionCode, Expression... args) {
+                     String runtimeVersion, String functionCode, boolean deterministic, Expression... args) {
         super(name, args);
         this.dbName = dbName;
         this.functionId = functionId;
@@ -82,6 +83,7 @@ public class PythonUdf extends ScalarFunction implements ExplicitlyCastableSigna
         this.expirationTime = expirationTime;
         this.runtimeVersion = runtimeVersion;
         this.functionCode = functionCode;
+        this.deterministic = deterministic;
     }
 
     @Override
@@ -104,6 +106,11 @@ public class PythonUdf extends ScalarFunction implements ExplicitlyCastableSigna
         return nullableMode;
     }
 
+    @Override
+    public boolean isDeterministic() {
+        return deterministic;
+    }
+
     /**
      * withChildren.
      */
@@ -112,7 +119,7 @@ public class PythonUdf extends ScalarFunction implements ExplicitlyCastableSigna
         Preconditions.checkArgument(children.size() == this.children.size());
         return new PythonUdf(getName(), functionId, dbName, binaryType, signature, nullableMode,
             objectFile, symbol, prepareFn, closeFn, checkSum, isStaticLoad, expirationTime,
-            runtimeVersion, functionCode, children.toArray(new Expression[0]));
+            runtimeVersion, functionCode, deterministic, children.toArray(new Expression[0]));
     }
 
     /**
@@ -143,6 +150,7 @@ public class PythonUdf extends ScalarFunction implements ExplicitlyCastableSigna
                 scalar.getChecksum(), scalar.isStaticLoad(), scalar.getExpirationTime(),
                 scalar.getRuntimeVersion(),
                 scalar.getFunctionCode(),
+                scalar.isDeterministic(),
                 arguments);
 
         PythonUdfBuilder builder = new PythonUdfBuilder(udf);
@@ -175,6 +183,7 @@ public class PythonUdf extends ScalarFunction implements ExplicitlyCastableSigna
             expr.setExpirationTime(expirationTime);
             expr.setRuntimeVersion(runtimeVersion);
             expr.setFunctionCode(functionCode);
+            expr.setDeterministic(deterministic);
             return expr;
         } catch (Exception e) {
             throw new AnalysisException(e.getMessage(), e.getCause());

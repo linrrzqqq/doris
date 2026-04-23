@@ -114,6 +114,8 @@ public class Function implements Writable {
     protected String runtimeVersion;
     @SerializedName("fc")
     protected String functionCode;
+    @SerializedName("det")
+    protected boolean deterministic = false;
 
     // Only used for serialization
     protected Function() {
@@ -174,6 +176,7 @@ public class Function implements Writable {
         this.expirationTime = other.expirationTime;
         this.runtimeVersion = other.runtimeVersion;
         this.functionCode = other.functionCode;
+        this.deterministic = other.deterministic;
     }
 
     public Function clone() {
@@ -301,6 +304,14 @@ public class Function implements Writable {
         this.functionCode = functionCode;
     }
 
+    public boolean isDeterministic() {
+        return deterministic;
+    }
+
+    public void setDeterministic(boolean deterministic) {
+        this.deterministic = deterministic;
+    }
+
     // TODO(cmy): Currently we judge whether it is UDF by wheter the 'location' is set.
     // Maybe we should use a separate variable to identify,
     // but additional variables need to modify the persistence information.
@@ -401,7 +412,8 @@ public class Function implements Writable {
         }
         Function function = (Function) o;
         return id == function.id && hasVarArgs == function.hasVarArgs && userVisible == function.userVisible
-                && vectorized == function.vectorized && Objects.equals(name, function.name)
+                && vectorized == function.vectorized && deterministic == function.deterministic
+                && Objects.equals(name, function.name)
                 && Objects.equals(retType, function.retType) && Arrays.equals(argTypes,
                 function.argTypes) && Objects.equals(location, function.location)
                 && binaryType == function.binaryType && nullableMode == function.nullableMode && Objects.equals(
@@ -411,7 +423,7 @@ public class Function implements Writable {
     @Override
     public int hashCode() {
         int result = Objects.hash(id, name, retType, hasVarArgs, userVisible, location, binaryType, nullableMode,
-                vectorized, checksum);
+                vectorized, checksum, deterministic);
         result = 31 * result + Arrays.hashCode(argTypes);
         return result;
     }
