@@ -45,6 +45,7 @@ public class FunctionToSqlConverterTest {
         Assertions.assertTrue(sql.contains("\"FILE\"=\"\""));
         Assertions.assertTrue(sql.contains("\"TYPE\"=\"JAVA_UDF\""));
         Assertions.assertTrue(sql.contains("\"ALWAYS_NULLABLE\"="));
+        Assertions.assertTrue(sql.contains("\"DETERMINISTIC\"=\"false\""));
         Assertions.assertFalse(sql.contains("OBJECT_FILE"));
         Assertions.assertFalse(sql.contains("IF NOT EXISTS"));
         Assertions.assertFalse(sql.contains("GLOBAL"));
@@ -186,6 +187,7 @@ public class FunctionToSqlConverterTest {
         Assertions.assertTrue(sql.contains("\"FILE\"=\"\""));
         Assertions.assertTrue(sql.contains("\"TYPE\"=\"JAVA_UDF\""));
         Assertions.assertTrue(sql.contains("\"ALWAYS_NULLABLE\"="));
+        Assertions.assertTrue(sql.contains("\"DETERMINISTIC\"=\"false\""));
         Assertions.assertFalse(sql.contains("INIT_FN"));
         Assertions.assertFalse(sql.contains("UPDATE_FN"));
         Assertions.assertFalse(sql.contains("MERGE_FN"));

@@ -58,6 +58,7 @@ public class PythonUdtf extends TableGeneratingFunction implements ExplicitlyCas
     private final long expirationTime;
     private final String runtimeVersion;
     private final String functionCode;
+    private final boolean deterministic;
 
     /**
      * Constructor of Python UDTF
@@ -66,7 +67,7 @@ public class PythonUdtf extends TableGeneratingFunction implements ExplicitlyCas
             FunctionSignature signature,
             NullableMode nullableMode, String objectFile, String symbol, String prepareFn, String closeFn,
             String checkSum, boolean isStaticLoad, long expirationTime,
-            String runtimeVersion, String functionCode, Expression... args) {
+            String runtimeVersion, String functionCode, boolean deterministic, Expression... args) {
         super(name, args);
         this.dbName = dbName;
         this.functionId = functionId;
@@ -82,6 +83,7 @@ public class PythonUdtf extends TableGeneratingFunction implements ExplicitlyCas
         this.expirationTime = expirationTime;
         this.runtimeVersion = runtimeVersion;
         this.functionCode = functionCode;
+        this.deterministic = deterministic;
     }
 
     /**
@@ -92,12 +94,17 @@ public class PythonUdtf extends TableGeneratingFunction implements ExplicitlyCas
         Preconditions.checkArgument(children.size() == this.children.size());
         return new PythonUdtf(getName(), functionId, dbName, binaryType, signature, nullableMode,
                 objectFile, symbol, prepareFn, closeFn, checkSum, isStaticLoad, expirationTime,
-                runtimeVersion, functionCode, children.toArray(new Expression[0]));
+                runtimeVersion, functionCode, deterministic, children.toArray(new Expression[0]));
     }
 
     @Override
     public List<FunctionSignature> getSignatures() {
         return ImmutableList.of(signature);
+    }
+
+    @Override
+    public boolean isDeterministic() {
+        return deterministic;
     }
 
     @Override
@@ -132,6 +139,7 @@ public class PythonUdtf extends TableGeneratingFunction implements ExplicitlyCas
             expr.setUDTFunction(true);
             expr.setRuntimeVersion(runtimeVersion);
             expr.setFunctionCode(functionCode);
+            expr.setDeterministic(deterministic);
             return expr;
         } catch (Exception e) {
             throw new AnalysisException(e.getMessage(), e.getCause());
@@ -168,6 +176,7 @@ public class PythonUdtf extends TableGeneratingFunction implements ExplicitlyCas
                 scalar.getExpirationTime(),
                 scalar.getRuntimeVersion(),
                 scalar.getFunctionCode(),
+                scalar.isDeterministic(),
                 arguments);
 
         PythonUdtfBuilder builder = new PythonUdtfBuilder(udtf);

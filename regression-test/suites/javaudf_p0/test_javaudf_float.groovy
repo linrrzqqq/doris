@@ -64,12 +64,24 @@ suite("test_javaudf_float") {
         qt_select """ SELECT java_udf_float_test(2.83645,null) as result ; """
         qt_select """ SELECT java_udf_float_test(cast(2.83645 as float),null) as result ; """
         qt_select """ SELECT user_id,java_udf_float_test(float_1, float_2) as sum FROM ${tableName} order by user_id; """
-        createMV("create materialized view udf_mv as SELECT user_id as a1,java_udf_float_test(float_1, float_2) as sum FROM test_javaudf_float order by user_id;")
+        sql """ DROP MATERIALIZED VIEW IF EXISTS udf_mv; """
+        sql """
+        CREATE MATERIALIZED VIEW udf_mv
+        BUILD DEFERRED REFRESH AUTO ON MANUAL
+        DISTRIBUTED BY RANDOM BUCKETS 2
+        PROPERTIES (
+        'replication_num' = '1',
+        'version_info'='3',
+        'enable_nondeterministic_function' = 'true'
+        )
+        AS
+        SELECT user_id as a1, java_udf_float_test(float_1, float_2) as sum FROM ${tableName};
+        """
         qt_select """ SELECT user_id,java_udf_float_test(float_1, float_2) as sum FROM ${tableName} order by user_id; """
 
         explain {
             sql("SELECT user_id,java_udf_float_test(float_1, float_2) as sum FROM ${tableName} order by user_id; ")
-            contains "(udf_mv)"
+            notContains "(udf_mv)"
         }
         
 
@@ -90,6 +102,7 @@ suite("test_javaudf_float") {
 
         
     } finally {
+        try_sql("DROP MATERIALIZED VIEW IF EXISTS udf_mv;")
         try_sql("DROP FUNCTION IF EXISTS java_udf_double_test(DOUBLE,DOUBLE);")
         try_sql("DROP FUNCTION IF EXISTS java_udf_float_test(FLOAT,FLOAT);")
         try_sql("DROP TABLE IF EXISTS ${tableName}")

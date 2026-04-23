@@ -62,6 +62,7 @@ public class JavaUdaf extends AggregateFunction implements ExplicitlyCastableSig
     private final String checkSum;
     private final boolean isStaticLoad;
     private final long expirationTime;
+    private final boolean deterministic;
 
     /**
      * Constructor of UDAF
@@ -72,7 +73,8 @@ public class JavaUdaf extends AggregateFunction implements ExplicitlyCastableSig
             String objectFile, String symbol,
             String initFn, String updateFn, String mergeFn,
             String serializeFn, String finalizeFn, String getValueFn, String removeFn,
-            boolean isDistinct, String checkSum, boolean isStaticLoad, long expirationTime, Expression... args) {
+            boolean isDistinct, String checkSum, boolean isStaticLoad, long expirationTime,
+            boolean deterministic, Expression... args) {
         super(name, isDistinct, args);
         this.dbName = dbName;
         this.functionId = functionId;
@@ -92,6 +94,7 @@ public class JavaUdaf extends AggregateFunction implements ExplicitlyCastableSig
         this.checkSum = checkSum;
         this.isStaticLoad = isStaticLoad;
         this.expirationTime = expirationTime;
+        this.deterministic = deterministic;
     }
 
     @Override
@@ -114,6 +117,11 @@ public class JavaUdaf extends AggregateFunction implements ExplicitlyCastableSig
         return nullableMode;
     }
 
+    @Override
+    public boolean isDeterministic() {
+        return deterministic;
+    }
+
     /**
      * withChildren.
      */
@@ -122,7 +130,8 @@ public class JavaUdaf extends AggregateFunction implements ExplicitlyCastableSig
         Preconditions.checkArgument(children.size() == this.children.size());
         return new JavaUdaf(getName(), functionId, dbName, binaryType, signature, intermediateType, nullableMode,
                 objectFile, symbol, initFn, updateFn, mergeFn, serializeFn, finalizeFn, getValueFn, removeFn,
-                isDistinct, checkSum, isStaticLoad, expirationTime, children.toArray(new Expression[0]));
+                isDistinct, checkSum, isStaticLoad, expirationTime, deterministic,
+                children.toArray(new Expression[0]));
     }
 
     /**
@@ -165,6 +174,7 @@ public class JavaUdaf extends AggregateFunction implements ExplicitlyCastableSig
                 aggregate.getChecksum(),
                 aggregate.isStaticLoad(),
                 aggregate.getExpirationTime(),
+                aggregate.isDeterministic(),
                 arguments);
 
         JavaUdafBuilder builder = new JavaUdafBuilder(udaf);
@@ -201,6 +211,7 @@ public class JavaUdaf extends AggregateFunction implements ExplicitlyCastableSig
             expr.setId(functionId);
             expr.setStaticLoad(isStaticLoad);
             expr.setExpirationTime(expirationTime);
+            expr.setDeterministic(deterministic);
             return expr;
         } catch (Exception e) {
             throw new AnalysisException(e.getMessage(), e.getCause());

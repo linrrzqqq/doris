@@ -64,6 +64,7 @@ public class PythonUdaf extends AggregateFunction implements ExplicitlyCastableS
     private final long expirationTime;
     private final String runtimeVersion;
     private final String functionCode;
+    private final boolean deterministic;
 
     /**
      * Constructor of UDAF
@@ -75,7 +76,7 @@ public class PythonUdaf extends AggregateFunction implements ExplicitlyCastableS
                       String initFn, String updateFn, String mergeFn,
                       String serializeFn, String finalizeFn, String getValueFn, String removeFn,
                       boolean isDistinct, String checkSum, boolean isStaticLoad, long expirationTime,
-                      String runtimeVersion, String functionCode, Expression... args) {
+                      String runtimeVersion, String functionCode, boolean deterministic, Expression... args) {
         super(name, isDistinct, args);
         this.dbName = dbName;
         this.functionId = functionId;
@@ -97,6 +98,7 @@ public class PythonUdaf extends AggregateFunction implements ExplicitlyCastableS
         this.expirationTime = expirationTime;
         this.runtimeVersion = runtimeVersion;
         this.functionCode = functionCode;
+        this.deterministic = deterministic;
     }
 
     @Override
@@ -119,6 +121,11 @@ public class PythonUdaf extends AggregateFunction implements ExplicitlyCastableS
         return nullableMode;
     }
 
+    @Override
+    public boolean isDeterministic() {
+        return deterministic;
+    }
+
     /**
      * withChildren.
      */
@@ -127,7 +134,7 @@ public class PythonUdaf extends AggregateFunction implements ExplicitlyCastableS
         Preconditions.checkArgument(children.size() == this.children.size());
         return new PythonUdaf(getName(), functionId, dbName, binaryType, signature, intermediateType, nullableMode,
                 objectFile, symbol, initFn, updateFn, mergeFn, serializeFn, finalizeFn, getValueFn, removeFn,
-                isDistinct, checkSum, isStaticLoad, expirationTime, runtimeVersion, functionCode,
+                isDistinct, checkSum, isStaticLoad, expirationTime, runtimeVersion, functionCode, deterministic,
                 children.toArray(new Expression[0]));
     }
 
@@ -173,6 +180,7 @@ public class PythonUdaf extends AggregateFunction implements ExplicitlyCastableS
                 aggregate.getExpirationTime(),
                 aggregate.getRuntimeVersion(),
                 aggregate.getFunctionCode(),
+                aggregate.isDeterministic(),
                 arguments);
 
         PythonUdafBuilder builder = new PythonUdafBuilder(udaf);
@@ -211,6 +219,7 @@ public class PythonUdaf extends AggregateFunction implements ExplicitlyCastableS
             expr.setExpirationTime(expirationTime);
             expr.setRuntimeVersion(runtimeVersion);
             expr.setFunctionCode(functionCode);
+            expr.setDeterministic(deterministic);
             return expr;
         } catch (Exception e) {
             throw new AnalysisException(e.getMessage(), e.getCause());
