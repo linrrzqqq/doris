@@ -19,6 +19,7 @@
 
 #include <arrow/util/base64.h>
 #include <fmt/core.h>
+#include <glog/logging.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
 
@@ -139,41 +140,67 @@ std::string PythonUDFMeta::to_string() const {
 }
 
 Status PythonUDFMeta::check() const {
+    LOG(INFO) << fmt::format(
+            "[pyudf-test] PythonUDFMeta::check name={}, symbol={}, location={}, "
+            "runtime_version={}, "
+            "load_type={}, client_type={}, inline_code_empty={}, checksum_empty={}, "
+            "input_types_size={}, "
+            "has_return_type={}, always_nullable={}",
+            name, symbol, location, runtime_version, static_cast<int>(type),
+            static_cast<int>(client_type), inline_code.empty() ? "true" : "false",
+            checksum.empty() ? "true" : "false", input_types.size(), return_type ? "true" : "false",
+            always_nullable ? "true" : "false");
     if (trim(name).empty()) {
+        LOG(WARNING) << "[pyudf-test] PythonUDFMeta::check failed: empty name";
         return Status::InvalidArgument("Python UDF name is empty");
     }
 
     if (trim(symbol).empty()) {
+        LOG(WARNING) << "[pyudf-test] PythonUDFMeta::check failed: empty symbol";
         return Status::InvalidArgument("Python UDF symbol is empty");
     }
 
     if (trim(runtime_version).empty()) {
+        LOG(WARNING) << "[pyudf-test] PythonUDFMeta::check failed: empty runtime_version";
         return Status::InvalidArgument("Python UDF runtime version is empty");
     }
 
     if (input_types.empty() &&
         (client_type == PythonClientType::UDAF || type == PythonUDFLoadType::UNKNOWN)) {
+        LOG(WARNING) << fmt::format(
+                "[pyudf-test] PythonUDFMeta::check failed: empty input_types, client_type={}, "
+                "load_type={}",
+                static_cast<int>(client_type), static_cast<int>(type));
         return Status::InvalidArgument("Python UDAF input types is empty");
     }
 
     if (!return_type) {
+        LOG(WARNING) << "[pyudf-test] PythonUDFMeta::check failed: empty return_type";
         return Status::InvalidArgument("Python UDF return type is empty");
     }
 
     if (type == PythonUDFLoadType::UNKNOWN) {
+        LOG(WARNING) << fmt::format(
+                "[pyudf-test] PythonUDFMeta::check failed: unknown load_type, "
+                "inline_code_empty={}, "
+                "location_empty={}",
+                inline_code.empty() ? "true" : "false", trim(location).empty() ? "true" : "false");
         return Status::InvalidArgument(
                 "Python UDF load type is invalid, please check inline code or file path");
     }
 
     if (type == PythonUDFLoadType::MODULE) {
         if (trim(location).empty()) {
+            LOG(WARNING) << "[pyudf-test] PythonUDFMeta::check failed: module location empty";
             return Status::InvalidArgument("Non-inline Python UDF location is empty");
         }
         if (trim(checksum).empty()) {
+            LOG(WARNING) << "[pyudf-test] PythonUDFMeta::check failed: module checksum empty";
             return Status::InvalidArgument("Non-inline Python UDF checksum is empty");
         }
     }
 
+    LOG(INFO) << "[pyudf-test] PythonUDFMeta::check passed";
     return Status::OK();
 }
 

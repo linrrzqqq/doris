@@ -19,6 +19,7 @@ package org.apache.doris.analysis;
 
 import org.apache.doris.analysis.ArithmeticExpr.Operator;
 import org.apache.doris.catalog.ArrayType;
+import org.apache.doris.catalog.Function.BinaryType;
 import org.apache.doris.catalog.FunctionToThriftConverter;
 import org.apache.doris.catalog.ScalarType;
 import org.apache.doris.catalog.StructType;
@@ -114,6 +115,15 @@ public class ExprToThriftVisitor extends ExprVisitor<Void, TExprNode> {
         msg.type = expr.getType().toThrift();
         msg.num_children = expr.getChildren().size();
         if (expr.getFn() != null) {
+            if (expr.getFn().getBinaryType() == BinaryType.PYTHON_UDF) {
+                LOG.info("[pyudf-test] ExprToThriftVisitor exprFn signature={}, location={}, runtimeVersion={}, "
+                                + "functionCodeEmpty={}, childCount={}",
+                        expr.getFn().signatureString(),
+                        expr.getFn().getLocation() == null ? "null" : expr.getFn().getLocation().getLocation(),
+                        expr.getFn().getRuntimeVersion(),
+                        expr.getFn().getFunctionCode() == null || expr.getFn().getFunctionCode().isEmpty(),
+                        expr.getChildren().size());
+            }
             msg.setFn(FunctionToThriftConverter.toThrift(expr.getFn(),
                     expr.getType(), expr.collectChildReturnTypes(), expr.collectChildReturnNullables()));
             if (expr.getFn().hasVarArgs()) {

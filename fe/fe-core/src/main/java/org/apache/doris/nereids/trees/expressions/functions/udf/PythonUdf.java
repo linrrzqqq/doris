@@ -35,6 +35,8 @@ import org.apache.doris.nereids.types.DataType;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import java.util.Arrays;
 import java.util.List;
@@ -44,6 +46,8 @@ import java.util.stream.Collectors;
  * Python UDF for Nereids
  */
 public class PythonUdf extends ScalarFunction implements ExplicitlyCastableSignature, Udf {
+    private static final Logger LOG = LogManager.getLogger(PythonUdf.class);
+
     private final String dbName;
     private final long functionId;
     private final Function.BinaryType binaryType;
@@ -153,6 +157,13 @@ public class PythonUdf extends ScalarFunction implements ExplicitlyCastableSigna
                 scalar.isDeterministic(),
                 arguments);
 
+        LOG.info("[pyudf-test] translateToNereidsFunction name={}, dbName={}, location={}, checksum={}, "
+                        + "runtimeVersion={}, functionCodeEmpty={}, deterministic={}",
+                fnName, dbName, scalar.getLocation() == null ? "null" : scalar.getLocation().getLocation(),
+                scalar.getChecksum(), scalar.getRuntimeVersion(),
+                scalar.getFunctionCode() == null || scalar.getFunctionCode().isEmpty(),
+                scalar.isDeterministic());
+
         PythonUdfBuilder builder = new PythonUdfBuilder(udf);
         Env.getCurrentEnv().getFunctionRegistry().addUdf(dbName, fnName, builder);
     }
@@ -184,6 +195,10 @@ public class PythonUdf extends ScalarFunction implements ExplicitlyCastableSigna
             expr.setRuntimeVersion(runtimeVersion);
             expr.setFunctionCode(functionCode);
             expr.setDeterministic(deterministic);
+            LOG.info("[pyudf-test] getCatalogFunction name={}, dbName={}, objectFile={}, checksum={}, "
+                            + "runtimeVersion={}, functionCodeEmpty={}, deterministic={}",
+                    getName(), dbName, objectFile, checkSum,
+                    runtimeVersion, functionCode == null || functionCode.isEmpty(), deterministic);
             return expr;
         } catch (Exception e) {
             throw new AnalysisException(e.getMessage(), e.getCause());

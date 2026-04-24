@@ -29,12 +29,15 @@ import com.google.common.base.Objects;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.google.gson.annotations.SerializedName;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import java.text.StringCharacterIterator;
 import java.util.List;
 
 // TODO: for aggregations, we need to unify the code paths for builtins and UDAs.
 public class FunctionCallExpr extends Expr {
+    private static final Logger LOG = LogManager.getLogger(FunctionCallExpr.class);
 
     @SerializedName("fnn")
     private FunctionName fnName;
@@ -127,6 +130,15 @@ public class FunctionCallExpr extends Expr {
         this.originChildSize = children.size();
         this.isMergeAggFn = isMergeAggFn;
         this.nullable = nullable;
+        if (function.getBinaryType() == Function.BinaryType.PYTHON_UDF) {
+            LOG.info("[pyudf-test] FunctionCallExpr ctor signature={}, location={}, runtimeVersion={}, "
+                            + "functionCodeEmpty={}, childCount={}, nullable={}",
+                    function.signatureString(),
+                    function.getLocation() == null ? "null" : function.getLocation().getLocation(),
+                    function.getRuntimeVersion(),
+                    function.getFunctionCode() == null || function.getFunctionCode().isEmpty(),
+                    children.size(), nullable);
+        }
     }
 
     protected FunctionCallExpr(FunctionCallExpr other) {

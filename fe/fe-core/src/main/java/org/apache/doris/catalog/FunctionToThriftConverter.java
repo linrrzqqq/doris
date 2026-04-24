@@ -25,11 +25,14 @@ import org.apache.doris.thrift.TScalarFunction;
 
 import com.google.common.base.Strings;
 import com.google.common.collect.Lists;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 /**
  * Converts {@link Function} and its subclasses to their Thrift representations.
  */
 public class FunctionToThriftConverter {
+    private static final Logger LOG = LogManager.getLogger(FunctionToThriftConverter.class);
 
     /**
      * Converts a {@link Function.BinaryType} to its Thrift representation.
@@ -97,6 +100,14 @@ public class FunctionToThriftConverter {
                 tfn.setFunctionCode(fn.getFunctionCode());
             }
             tfn.setRuntimeVersion(fn.getRuntimeVersion());
+            LOG.info("[pyudf-test] scalar toThrift python udf signature={}, location={}, hdfsLocationIsSet={}, "
+                            + "runtimeVersion={}, functionCodeEmpty={}, checksum={}",
+                    fn.signatureString(),
+                    fn.getLocation() == null ? "null" : fn.getLocation().getLocation(),
+                    tfn.isSetHdfsLocation(),
+                    fn.getRuntimeVersion(),
+                    Strings.isNullOrEmpty(fn.getFunctionCode()),
+                    fn.getChecksum());
         }
         if (fn.getDictFunction() != null) {
             tfn.setDictFunction(fn.getDictFunction());
@@ -160,6 +171,16 @@ public class FunctionToThriftConverter {
         tfn.setBinaryType(toThriftBinaryType(fn.getBinaryType()));
         if (fn.getLocation() != null) {
             tfn.setHdfsLocation(fn.getLocation().getLocation());
+        }
+        if (fn.getBinaryType() == Function.BinaryType.PYTHON_UDF) {
+            LOG.info("[pyudf-test] toThriftBase python udf signature={}, location={}, hdfsLocationIsSet={}, "
+                            + "runtimeVersion={}, functionCodeEmpty={}, checksum={}",
+                    fn.signatureString(),
+                    fn.getLocation() == null ? "null" : fn.getLocation().getLocation(),
+                    tfn.isSetHdfsLocation(),
+                    fn.getRuntimeVersion(),
+                    Strings.isNullOrEmpty(fn.getFunctionCode()),
+                    fn.getChecksum());
         }
         // `realArgTypes.length != argTypes.length` is true iff this is an aggregation
         // function.

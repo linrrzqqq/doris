@@ -945,7 +945,19 @@ public class ExpressionTranslator extends DefaultExpressionVisitor<Expr, PlanTra
         FunctionParams exprs = new FunctionParams(udf.children().stream()
                 .map(expression -> expression.accept(this, context))
                 .collect(Collectors.toList()));
-        return new FunctionCallExpr(udf.getCatalogFunction(), exprs, udf.nullable());
+        org.apache.doris.catalog.Function catalogFunction = udf.getCatalogFunction();
+        if (catalogFunction instanceof org.apache.doris.catalog.ScalarFunction) {
+            org.apache.doris.catalog.ScalarFunction scalarFunction =
+                    (org.apache.doris.catalog.ScalarFunction) catalogFunction;
+            LOG.info("[pyudf-test] ExpressionTranslator.visitPythonUdf name={}, location={}, runtimeVersion={}, "
+                            + "functionCodeEmpty={}, childCount={}, nullable={}",
+                    udf.getName(),
+                    scalarFunction.getLocation() == null ? "null" : scalarFunction.getLocation().getLocation(),
+                    scalarFunction.getRuntimeVersion(),
+                    scalarFunction.getFunctionCode() == null || scalarFunction.getFunctionCode().isEmpty(),
+                    udf.children().size(), udf.nullable());
+        }
+        return new FunctionCallExpr(catalogFunction, exprs, udf.nullable());
     }
 
     @Override

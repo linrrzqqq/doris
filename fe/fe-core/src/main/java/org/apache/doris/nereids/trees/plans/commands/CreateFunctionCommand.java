@@ -367,6 +367,10 @@ public class CreateFunctionCommand extends Command implements ForwardWithSync {
                         + "'3.X.X' or '3.XX.XX' (e.g. '3.10.2').", runtimeVersionString));
             }
             runtimeVersion = runtimeVersionString;
+            LOG.info("[pyudf-test] analyzeCommon python udf functionName={}, userFile={}, "
+                            + "originalUserFile={}, runtimeVersion={}, functionCodeEmpty={}, properties={}",
+                    functionName, userFile, originalUserFile, runtimeVersion,
+                    Strings.isNullOrEmpty(functionCode), properties);
         }
         if (binaryType == Function.BinaryType.JAVA_UDF || binaryType == Function.BinaryType.PYTHON_UDF) {
             Boolean deterministicProperty = parseBooleanFromProperties(IS_DETERMINISTIC);
@@ -560,6 +564,10 @@ public class CreateFunctionCommand extends Command implements ForwardWithSync {
         function.setRuntimeVersion(runtimeVersion);
         function.setFunctionCode(functionCode);
         function.setDeterministic(deterministic);
+        LOG.info("[pyudf-test] analyzeUdf created function signature={}, binaryType={}, location={}, "
+                        + "checksum={}, runtimeVersion={}, functionCodeEmpty={}, deterministic={}",
+                function.signatureString(), binaryType, location == null ? "null" : location.getLocation(),
+                checksum, runtimeVersion, Strings.isNullOrEmpty(functionCode), deterministic);
     }
 
     private void analyzeUdf() throws AnalysisException {
@@ -633,9 +641,13 @@ public class CreateFunctionCommand extends Command implements ForwardWithSync {
         }
 
         if (Strings.isNullOrEmpty(this.functionCode)) {
+            LOG.info("[pyudf-test] analyzePythonUdaf module mode symbol={}, userFile={}, runtimeVersion={}",
+                    clazz, originalUserFile, runtimeVersion);
             return;
         }
 
+        LOG.info("[pyudf-test] analyzePythonUdaf inline raw symbol={}, rawCodeLength={}, runtimeVersion={}",
+                clazz, this.functionCode.length(), runtimeVersion);
         this.functionCode = this.functionCode.trim();
         if (!(this.functionCode.startsWith("$$") && this.functionCode.endsWith("$$"))) {
             throw new AnalysisException("Inline Python UDAF code must be start with $$ and end with $$");
@@ -645,6 +657,9 @@ public class CreateFunctionCommand extends Command implements ForwardWithSync {
         if (this.functionCode.isEmpty()) {
             throw new AnalysisException("Inline Python UDAF is empty");
         }
+        LOG.info("[pyudf-test] analyzePythonUdaf inline normalized symbol={}, normalizedCodeLength={}, "
+                        + "runtimeVersion={}",
+                clazz, this.functionCode.length(), runtimeVersion);
     }
 
     private void checkUdafClass(String clazz, ClassLoader cl, HashMap<String, Method> allMethods)
@@ -804,9 +819,13 @@ public class CreateFunctionCommand extends Command implements ForwardWithSync {
         }
 
         if (Strings.isNullOrEmpty(this.functionCode)) {
+            LOG.info("[pyudf-test] analyzePythonUdf module mode symbol={}, userFile={}, runtimeVersion={}",
+                    clazz, originalUserFile, runtimeVersion);
             return;
         }
 
+        LOG.info("[pyudf-test] analyzePythonUdf inline raw symbol={}, rawCodeLength={}, runtimeVersion={}",
+                clazz, this.functionCode.length(), runtimeVersion);
         this.functionCode = this.functionCode.trim();
         if (!(this.functionCode.startsWith("$$") && this.functionCode.endsWith("$$"))) {
             throw new AnalysisException("Inline Python UDF code must be start with $$ and end with $$");
@@ -816,6 +835,9 @@ public class CreateFunctionCommand extends Command implements ForwardWithSync {
         if (this.functionCode.isEmpty()) {
             throw new AnalysisException("Inline Python UDF is empty");
         }
+        LOG.info("[pyudf-test] analyzePythonUdf inline normalized symbol={}, normalizedCodeLength={}, "
+                        + "runtimeVersion={}",
+                clazz, this.functionCode.length(), runtimeVersion);
     }
 
     private void checkUdfClass(String clazz, ClassLoader cl) throws ClassNotFoundException, AnalysisException {
@@ -916,9 +938,13 @@ public class CreateFunctionCommand extends Command implements ForwardWithSync {
         }
 
         if (Strings.isNullOrEmpty(this.functionCode)) {
+            LOG.info("[pyudf-test] analyzePythonUdtf module mode symbol={}, userFile={}, runtimeVersion={}",
+                    clazz, originalUserFile, runtimeVersion);
             return;
         }
 
+        LOG.info("[pyudf-test] analyzePythonUdtf inline raw symbol={}, rawCodeLength={}, runtimeVersion={}",
+                clazz, this.functionCode.length(), runtimeVersion);
         this.functionCode = this.functionCode.trim();
         if (!(this.functionCode.startsWith("$$") && this.functionCode.endsWith("$$"))) {
             throw new AnalysisException("Inline Python UDTF code must be start with $$ and end with $$");
@@ -928,6 +954,9 @@ public class CreateFunctionCommand extends Command implements ForwardWithSync {
         if (this.functionCode.isEmpty()) {
             throw new AnalysisException("Inline Python UDTF is empty");
         }
+        LOG.info("[pyudf-test] analyzePythonUdtf inline normalized symbol={}, normalizedCodeLength={}, "
+                        + "runtimeVersion={}",
+                clazz, this.functionCode.length(), runtimeVersion);
     }
 
     private void checkRPCUdf(String symbol) throws AnalysisException {

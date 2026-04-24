@@ -27,6 +27,8 @@ import org.apache.doris.nereids.util.TypeCoercionUtils;
 
 import com.google.common.base.Suppliers;
 import com.google.common.collect.Lists;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import java.util.List;
 import java.util.Optional;
@@ -36,6 +38,8 @@ import java.util.stream.Collectors;
  * function builder for python udf
  */
 public class PythonUdfBuilder extends UdfBuilder {
+    private static final Logger LOG = LogManager.getLogger(PythonUdfBuilder.class);
+
     private final PythonUdf udf;
     private final int arity;
     private final boolean isVarArgs;
@@ -88,7 +92,16 @@ public class PythonUdfBuilder extends UdfBuilder {
         for (int i = 0; i < exprs.size(); ++i) {
             processedExprs.add(TypeCoercionUtils.castIfNotSameType(exprs.get(i), argTypes.get(i)));
         }
-        return Pair.ofSame(udf.withChildren(processedExprs));
+        PythonUdf built = udf.withChildren(processedExprs);
+        org.apache.doris.catalog.Function catalogFn = built.getCatalogFunction();
+        LOG.info("[pyudf-test] PythonUdfBuilder.build name={}, argCount={}, location={}, runtimeVersion={}, "
+                        + "functionCodeEmpty={}, nullableMode={}",
+                name, arguments.size(),
+                catalogFn.getLocation() == null ? "null" : catalogFn.getLocation().getLocation(),
+                catalogFn.getRuntimeVersion(),
+                catalogFn.getFunctionCode() == null || catalogFn.getFunctionCode().isEmpty(),
+                catalogFn.getNullableMode());
+        return Pair.ofSame(built);
     }
 
     @Override

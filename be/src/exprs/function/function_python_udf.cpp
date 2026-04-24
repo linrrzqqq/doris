@@ -54,18 +54,37 @@ Status PythonFunctionCall::open(FunctionContext* context,
     func_meta.id = _fn.id;
     func_meta.name = _fn.name.function_name;
     func_meta.symbol = _fn.scalar_fn.symbol;
+    LOG(INFO) << fmt::format(
+            "[pyudf-test] be open raw tfunction name={}, symbol={}, has_hdfs_location={}, "
+            "hdfs_location={}, has_function_code={}, function_code_empty={}, "
+            "has_runtime_version={}, "
+            "runtime_version={}, checksum={}",
+            _fn.name.function_name, _fn.scalar_fn.symbol,
+            _fn.__isset.hdfs_location ? "true" : "false", _fn.hdfs_location,
+            _fn.__isset.function_code ? "true" : "false",
+            _fn.function_code.empty() ? "true" : "false",
+            _fn.__isset.runtime_version ? "true" : "false", _fn.runtime_version, _fn.checksum);
     if (!_fn.function_code.empty()) {
         func_meta.type = PythonUDFLoadType::INLINE;
         func_meta.location = "inline";
         func_meta.inline_code = _fn.function_code;
+        LOG(INFO) << fmt::format("[pyudf-test] be open inline mode code_length={}",
+                                 _fn.function_code.size());
     } else if (!_fn.hdfs_location.empty()) {
         func_meta.type = PythonUDFLoadType::MODULE;
         func_meta.location = _fn.hdfs_location;
         func_meta.checksum = _fn.checksum;
+        LOG(INFO) << fmt::format("[pyudf-test] be open module mode url={}, checksum={}",
+                                 _fn.hdfs_location, _fn.checksum);
     } else {
         func_meta.type = PythonUDFLoadType::UNKNOWN;
         func_meta.location = "unknown";
+        LOG(INFO) << "[pyudf-test] be open unknown mode because both function_code and "
+                     "hdfs_location are empty";
     }
+    LOG(INFO) << fmt::format(
+            "[pyudf-test] be open classified load_type={}, location={}, checksum={}",
+            static_cast<int>(func_meta.type), func_meta.location, func_meta.checksum);
 
     func_meta.input_types = _argument_types;
     func_meta.return_type = _return_type;
@@ -81,12 +100,15 @@ Status PythonFunctionCall::open(FunctionContext* context,
     func_meta.runtime_version = version.full_version;
     RETURN_IF_ERROR(func_meta.check());
     func_meta.always_nullable = _return_type->is_nullable();
-    LOG(INFO) << fmt::format("runtime_version: {}, func_meta: {}", version.to_string(),
+    LOG(INFO) << fmt::format("[pyudf-test] runtime_version: {}, func_meta: {}", version.to_string(),
                              func_meta.to_string());
 
     if (func_meta.type == PythonUDFLoadType::MODULE) {
         RETURN_IF_ERROR(UserFunctionCache::instance()->get_pypath(
                 func_meta.id, func_meta.location, func_meta.checksum, &func_meta.location));
+        LOG(INFO) << fmt::format(
+                "[pyudf-test] be open resolved module path id={}, resolved_location={}",
+                func_meta.id, func_meta.location);
     }
 
     PythonUDFClientPtr client = nullptr;
