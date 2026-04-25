@@ -637,32 +637,20 @@ struct BitmapAndNotCount {
 
     static void vector_vector(const TData& lvec, const TData& rvec, ResTData* res) {
         size_t size = lvec.size();
-        BitmapValue mid_data;
         for (size_t i = 0; i < size; ++i) {
-            mid_data = lvec[i];
-            mid_data &= rvec[i];
-            res[i] = lvec[i].andnot_cardinality(mid_data);
-            mid_data.reset();
+            res[i] = lvec[i].andnot_cardinality(rvec[i]);
         }
     }
     static void scalar_vector(const BitmapValue& lval, const TData& rvec, ResTData* res) {
         size_t size = rvec.size();
-        BitmapValue mid_data;
         for (size_t i = 0; i < size; ++i) {
-            mid_data = lval;
-            mid_data &= rvec[i];
-            res[i] = lval.andnot_cardinality(mid_data);
-            mid_data.reset();
+            res[i] = lval.andnot_cardinality(rvec[i]);
         }
     }
     static void vector_scalar(const TData& lvec, const BitmapValue& rval, ResTData* res) {
         size_t size = lvec.size();
-        BitmapValue mid_data;
         for (size_t i = 0; i < size; ++i) {
-            mid_data = lvec[i];
-            mid_data &= rval;
-            res[i] = lvec[i].andnot_cardinality(mid_data);
-            mid_data.reset();
+            res[i] = lvec[i].andnot_cardinality(rval);
         }
     }
 };
@@ -904,25 +892,19 @@ struct BitmapHasAny {
     static void vector_vector(const TData& lvec, const TData& rvec, ResTData& res) {
         size_t size = lvec.size();
         for (size_t i = 0; i < size; ++i) {
-            auto bitmap = lvec[i];
-            bitmap &= rvec[i];
-            res[i] = bitmap.cardinality() != 0;
+            res[i] = lvec[i].intersects(rvec[i]);
         }
     }
     static void vector_scalar(const TData& lvec, const BitmapValue& rval, ResTData& res) {
         size_t size = lvec.size();
         for (size_t i = 0; i < size; ++i) {
-            auto bitmap = lvec[i];
-            bitmap &= rval;
-            res[i] = bitmap.cardinality() != 0;
+            res[i] = lvec[i].intersects(rval);
         }
     }
     static void scalar_vector(const BitmapValue& lval, const TData& rvec, ResTData& res) {
         size_t size = rvec.size();
         for (size_t i = 0; i < size; ++i) {
-            auto bitmap = lval;
-            bitmap &= rvec[i];
-            res[i] = bitmap.cardinality() != 0;
+            res[i] = lval.intersects(rvec[i]);
         }
     }
 };
@@ -942,28 +924,19 @@ struct BitmapHasAll {
     static void vector_vector(const TData& lvec, const TData& rvec, ResTData& res) {
         size_t size = lvec.size();
         for (size_t i = 0; i < size; ++i) {
-            uint64_t lhs_cardinality = lvec[i].cardinality();
-            auto bitmap = lvec[i];
-            bitmap |= rvec[i];
-            res[i] = bitmap.cardinality() == lhs_cardinality;
+            res[i] = lvec[i].contains_all(rvec[i]);
         }
     }
     static void vector_scalar(const TData& lvec, const BitmapValue& rval, ResTData& res) {
         size_t size = lvec.size();
         for (size_t i = 0; i < size; ++i) {
-            uint64_t lhs_cardinality = lvec[i].cardinality();
-            auto bitmap = lvec[i];
-            bitmap |= rval;
-            res[i] = bitmap.cardinality() == lhs_cardinality;
+            res[i] = lvec[i].contains_all(rval);
         }
     }
     static void scalar_vector(const BitmapValue& lval, const TData& rvec, ResTData& res) {
         size_t size = rvec.size();
-        uint64_t lhs_cardinality = lval.cardinality();
         for (size_t i = 0; i < size; ++i) {
-            auto bitmap = lval;
-            bitmap |= rvec[i];
-            res[i] = bitmap.cardinality() == lhs_cardinality;
+            res[i] = lval.contains_all(rvec[i]);
         }
     }
 };
