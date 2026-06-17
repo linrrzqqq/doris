@@ -127,6 +127,7 @@ private:
               _is_window_function(is_window_function) {};
 #endif
     Status _calc_argument_columns(Block* block);
+    Status _init_const_arguments();
 
     DataTypes _argument_types_with_sort;
     DataTypes _real_argument_types;
@@ -149,6 +150,7 @@ private:
     std::string _expr_name;
 
     std::vector<const IColumn*> _agg_columns;
+    std::vector<bool> _const_argument_idx;
 };
 
 } // namespace doris

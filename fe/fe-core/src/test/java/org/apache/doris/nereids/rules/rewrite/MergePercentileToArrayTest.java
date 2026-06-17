@@ -21,6 +21,7 @@ import org.apache.doris.nereids.util.MemoPatternMatchSupported;
 import org.apache.doris.nereids.util.PlanChecker;
 import org.apache.doris.utframe.TestWithFeService;
 
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 public class MergePercentileToArrayTest extends TestWithFeService implements MemoPatternMatchSupported {
@@ -54,7 +55,8 @@ public class MergePercentileToArrayTest extends TestWithFeService implements Mem
 
     @Test
     void testGrouping() {
-        String sql = "SELECT percentile(a, 0.11), percentile(a,0.25+0.1) as percentiles,sum(a) FROM t group by grouping sets((b),())";
+        String sql = "SELECT percentile(a, 0.11), percentile(a,0.35) as percentiles,sum(a) "
+                + "FROM t group by grouping sets((b),())";
         PlanChecker.from(connectContext)
                 .analyze(sql)
                 .rewrite()
@@ -64,5 +66,22 @@ public class MergePercentileToArrayTest extends TestWithFeService implements Mem
                                         && p.getProjects().get(1).toSql().contains("element_at(percentile_array"))
                 );
     }
-}
 
+    @Test
+    void testSkipMergeWhenQuantileIsNotLiteralAfterAnalyze() {
+        connectContext.getSessionVariable().setDebugSkipFoldConstant(true);
+        try {
+            String sql = "SELECT percentile(a, 0.11), percentile(a, 0.25 + 0.1) as percentiles,sum(a) "
+                    + "FROM t group by grouping sets((b),())";
+            String plan = PlanChecker.from(connectContext)
+                    .analyze(sql)
+                    .rewrite()
+                    .getPlan()
+                    .treeString();
+            Assertions.assertFalse(plan.contains("percentile_array"));
+            Assertions.assertTrue(plan.contains("percentile"));
+        } finally {
+            connectContext.getSessionVariable().setDebugSkipFoldConstant(false);
+        }
+    }
+}

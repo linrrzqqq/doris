@@ -25,6 +25,7 @@
 #include "core/column/column_vector.h"
 #include "core/data_type/data_type_number.h"
 #include "exprs/aggregate/aggregate_function_simple_factory.h"
+#include "testutil/mock/mock_literal_expr.h"
 
 namespace doris {
 
@@ -60,14 +61,17 @@ TEST(AggregateFunctionPercentileReservoirTest, optimized_single_place_paths) {
 
     std::vector<ColumnWithTypeAndName> arguments;
     arguments.emplace_back(create_value_block({1.0, 2.0, 3.0, 4.0}));
-    arguments.emplace_back(create_value_block({0.5, 0.5, 0.5, 0.5}));
+    VExprContextSPtrs input_exprs_ctxs(2);
+    input_exprs_ctxs[1] = MockLiteral::create_const<DataTypeFloat64>(0.5, 1);
+    ASSERT_TRUE(fn->set_const_arguments(input_exprs_ctxs).ok());
+    ASSERT_EQ(fn->get_const_argument_indexes(), (std::vector<size_t> {1}));
 
     Arena arena;
     std::unique_ptr<char[]> place_mem(new char[fn->size_of_data()]);
     AggregateDataPtr place = place_mem.get();
     fn->create(place);
 
-    const IColumn* columns[] = {arguments[0].column.get(), arguments[1].column.get()};
+    const IColumn* columns[] = {arguments[0].column.get(), nullptr};
 
     fn->add_batch_single_place(4, place, columns, arena);
     EXPECT_DOUBLE_EQ(read_result(fn, place), 2.5);
@@ -91,6 +95,18 @@ TEST(AggregateFunctionPercentileReservoirTest, optimized_single_place_paths) {
     EXPECT_FALSE(could_use_previous_result);
 
     fn->destroy(place);
+}
+
+TEST(AggregateFunctionPercentileReservoirTest, reject_invalid_const_level) {
+    auto fn = create_percentile_reservoir_function();
+    ASSERT_TRUE(fn != nullptr);
+
+    VExprContextSPtrs input_exprs_ctxs(2);
+    input_exprs_ctxs[1] = MockLiteral::create_const<DataTypeFloat64>(2.0, 1);
+
+    auto status = fn->set_const_arguments(input_exprs_ctxs);
+    ASSERT_FALSE(status.ok());
+    ASSERT_NE(status.msg().find("quantile in func percentile should in [0, 1]"), std::string::npos);
 }
 
 } // namespace doris

@@ -22,6 +22,7 @@
 #include "common/status.h"
 #include "core/arena.h"
 #include "core/block/block.h"
+#include "core/block/columns_with_type_and_name.h"
 #include "core/column/column.h"
 #include "core/column/column_nullable.h"
 #include "core/data_type/data_type.h"
@@ -38,7 +39,8 @@ public:
                      AggregateFunctionPtr agg_function)
             : _argument_types(argument_types),
               _return_type(return_type),
-              _agg_function(agg_function) {}
+              _agg_function(agg_function),
+              _const_argument_idx(argument_types.size(), false) {}
 
     static FunctionBasePtr create(const DataTypes& argument_types, const DataTypePtr& return_type,
                                   AggregateFunctionPtr agg_function) {
@@ -60,6 +62,21 @@ public:
         return _return_type;
     }
 
+    const std::vector<size_t>& get_const_argument_indexes() const override {
+        return _agg_function->get_const_argument_indexes();
+    }
+
+    Status set_const_arguments(const ColumnsWithTypeAndName& arguments) override {
+        for (auto index : get_const_argument_indexes()) {
+            if (index >= _const_argument_idx.size()) [[unlikely]] {
+                return Status::InternalError("Function {} requires invalid const argument {}",
+                                             get_name(), index);
+            }
+            _const_argument_idx[index] = true;
+        }
+        return _agg_function->set_const_arguments(arguments);
+    }
+
     Status execute_impl(FunctionContext* context, Block& block, const ColumnNumbers& arguments,
                         uint32_t result, size_t input_rows_count) const override {
         auto col = _agg_function->create_serialize_column();
@@ -67,6 +84,10 @@ public:
         std::vector<ColumnPtr> save_columns;
 
         for (size_t i = 0; i < arguments.size(); i++) {
+            if (_const_argument_idx[i]) {
+                agg_columns.push_back(nullptr);
+                continue;
+            }
             DataTypePtr signature =
                     assert_cast<const DataTypeAggState*>(_return_type.get())->get_sub_types()[i];
             ColumnPtr column =
@@ -94,6 +115,7 @@ private:
     DataTypes _argument_types;
     DataTypePtr _return_type;
     AggregateFunctionPtr _agg_function;
+    std::vector<bool> _const_argument_idx;
 };
 
 } // namespace doris

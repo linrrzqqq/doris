@@ -23,15 +23,16 @@ import org.apache.doris.nereids.rules.RuleType;
 import org.apache.doris.nereids.rules.analysis.NormalizeAggregate;
 import org.apache.doris.nereids.rules.rewrite.NormalizeToSlot.NormalizeToSlotContext;
 import org.apache.doris.nereids.trees.expressions.Alias;
+import org.apache.doris.nereids.trees.expressions.Cast;
 import org.apache.doris.nereids.trees.expressions.Expression;
 import org.apache.doris.nereids.trees.expressions.NamedExpression;
 import org.apache.doris.nereids.trees.expressions.Slot;
 import org.apache.doris.nereids.trees.expressions.functions.agg.AggregateFunction;
 import org.apache.doris.nereids.trees.expressions.functions.agg.Percentile;
 import org.apache.doris.nereids.trees.expressions.functions.agg.PercentileArray;
-import org.apache.doris.nereids.trees.expressions.functions.scalar.Array;
 import org.apache.doris.nereids.trees.expressions.functions.scalar.ElementAt;
 import org.apache.doris.nereids.trees.expressions.literal.ArrayLiteral;
+import org.apache.doris.nereids.trees.expressions.literal.DoubleLiteral;
 import org.apache.doris.nereids.trees.expressions.literal.IntegerLiteral;
 import org.apache.doris.nereids.trees.expressions.literal.Literal;
 import org.apache.doris.nereids.trees.plans.Plan;
@@ -79,27 +80,15 @@ public class MergePercentileToArray extends OneRewriteRuleFactory {
         List<AggregateFunction> newPercentileArrays = Lists.newArrayList();
 
         for (Map.Entry<DistinctAndExpr, List<AggregateFunction>> entry : funcMap.entrySet()) {
-            List<Expression> percentList = new ArrayList<>();
-            boolean allPercentIsLiteral = true;
+            List<Literal> percentList = new ArrayList<>();
             for (AggregateFunction aggFunc : entry.getValue()) {
-                Expression percent = aggFunc.child(1);
-                percentList.add(percent);
-                if (allPercentIsLiteral && !(percent instanceof Literal)) {
-                    allPercentIsLiteral = false;
-                }
-            }
-            ArrayLiteral percentArrayLiteral = null;
-            Array percentArray = null;
-            if (allPercentIsLiteral) {
-                percentArrayLiteral = new ArrayLiteral((List) percentList);
-            } else {
-                percentArray = new Array(percentList.toArray(new Expression[0]));
+                percentList.add(new DoubleLiteral(((Literal) unwrapCast(aggFunc.child(1))).getDouble()));
             }
 
             PercentileArray percentileArray;
-            Expression secondArg = allPercentIsLiteral
-                    ? TypeCoercionUtils.castIfNotSameType(percentArrayLiteral, ArrayType.of(DoubleType.INSTANCE))
-                    : TypeCoercionUtils.castIfNotSameType(percentArray, ArrayType.of(DoubleType.INSTANCE));
+            ArrayLiteral percentArrayLiteral = new ArrayLiteral(percentList);
+            Expression secondArg = TypeCoercionUtils.castIfNotSameType(percentArrayLiteral,
+                    ArrayType.of(DoubleType.INSTANCE));
             if (entry.getKey().isDistinct) {
                 percentileArray = new PercentileArray(true, entry.getKey().getExpression(), secondArg);
             } else {
@@ -108,6 +97,22 @@ public class MergePercentileToArray extends OneRewriteRuleFactory {
             newPercentileArrays.add(percentileArray);
         }
         return newPercentileArrays;
+    }
+
+    private boolean canMergePercentileArray(List<AggregateFunction> percentileFunctions) {
+        for (AggregateFunction aggFunc : percentileFunctions) {
+            if (!(unwrapCast(aggFunc.child(1)) instanceof Literal)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private Expression unwrapCast(Expression expression) {
+        if (expression instanceof Cast) {
+            return unwrapCast(expression.child(0));
+        }
+        return expression;
     }
 
     // Find all the percentile functions and place them in the map
@@ -128,6 +133,10 @@ public class MergePercentileToArray extends OneRewriteRuleFactory {
 
     private Plan doMerge(LogicalAggregate<Plan> aggregate) {
         Map<DistinctAndExpr, List<AggregateFunction>> funcMap = collectFuncMap(aggregate);
+        if (funcMap.isEmpty()) {
+            return aggregate;
+        }
+        funcMap.entrySet().removeIf(entry -> !canMergePercentileArray(entry.getValue()));
         if (funcMap.isEmpty()) {
             return aggregate;
         }

@@ -19,9 +19,13 @@ package org.apache.doris.nereids.trees.expressions.functions.agg;
 
 import org.apache.doris.catalog.FunctionSignature;
 import org.apache.doris.nereids.exceptions.AnalysisException;
+import org.apache.doris.nereids.trees.expressions.Cast;
 import org.apache.doris.nereids.trees.expressions.Expression;
 import org.apache.doris.nereids.trees.expressions.functions.ExplicitlyCastableSignature;
+import org.apache.doris.nereids.trees.expressions.functions.scalar.Array;
 import org.apache.doris.nereids.trees.expressions.literal.ArrayLiteral;
+import org.apache.doris.nereids.trees.expressions.literal.Literal;
+import org.apache.doris.nereids.trees.expressions.literal.NullLiteral;
 import org.apache.doris.nereids.trees.expressions.shape.BinaryExpression;
 import org.apache.doris.nereids.trees.expressions.visitor.ExpressionVisitor;
 import org.apache.doris.nereids.types.ArrayType;
@@ -82,10 +86,61 @@ public class PercentileArray extends NotNullableAggregateFunction
 
     @Override
     public void checkLegalityBeforeTypeCoercion() {
-        if (!getArgument(1).isConstant()) {
+        Expression quantiles = getArgument(1);
+        if (!isConstantQuantileArray(quantiles)) {
             throw new AnalysisException(
                     "percentile_array requires second parameter must be a constant : " + this.toSql());
         }
+    }
+
+    @Override
+    public void checkLegalityAfterRewrite() {
+        Expression quantiles = unwrapCast(getArgument(1));
+        if (quantiles instanceof ArrayLiteral || quantiles instanceof Array) {
+            for (Expression item : getArrayItems(quantiles)) {
+                Expression unwrapped = unwrapCast(item);
+                if (unwrapped instanceof NullLiteral) {
+                    throw new AnalysisException(
+                            "percentile_array quantile should not be null : " + this.toSql());
+                }
+                if (!(unwrapped instanceof Literal) || !unwrapped.getDataType().isNumericType()) {
+                    continue;
+                }
+                double value = ((Literal) unwrapped).getDouble();
+                if (value < 0.0 || value > 1.0) {
+                    throw new AnalysisException("percentile_array quantile must be in [0, 1], but got "
+                            + value + ": " + this.toSql());
+                }
+            }
+        }
+    }
+
+    private boolean isConstantQuantileArray(Expression quantiles) {
+        Expression unwrapped = unwrapCast(quantiles);
+        return unwrapped instanceof ArrayLiteral
+                || (unwrapped instanceof Array
+                        && getArrayItems(unwrapped).stream().allMatch(this::isLiteralExpression));
+    }
+
+    private List<? extends Expression> getArrayItems(Expression quantiles) {
+        if (quantiles instanceof ArrayLiteral) {
+            return ((ArrayLiteral) quantiles).getValue();
+        }
+        return quantiles.children();
+    }
+
+    private boolean isLiteralExpression(Expression quantile) {
+        Expression unwrapped = unwrapCast(quantile);
+        return unwrapped instanceof Literal
+                || (!unwrapped.children().isEmpty()
+                        && unwrapped.children().stream().allMatch(this::isLiteralExpression));
+    }
+
+    private Expression unwrapCast(Expression quantiles) {
+        if (quantiles instanceof Cast) {
+            return unwrapCast(quantiles.child(0));
+        }
+        return quantiles;
     }
 
     /**
