@@ -22,6 +22,7 @@
 
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 #include "common/exception.h"
 #include "common/status.h"
@@ -34,11 +35,13 @@
 #include "core/string_buffer.hpp"
 #include "core/types.h"
 #include "exec/common/hash_table/phmap_fwd_decl.h"
+#include "exprs/vexpr_fwd.h"
 #include "util/defer_op.h"
 
 namespace doris {
 
 class Arena;
+struct ColumnWithTypeAndName;
 class IColumn;
 class IDataType;
 
@@ -227,6 +230,15 @@ public:
                                                    const size_t num_rows, Arena&) const = 0;
 
     const DataTypes& get_argument_types() const { return argument_types; }
+
+    virtual const std::vector<size_t>& get_const_argument_indexes() const {
+        static const std::vector<size_t> indexes;
+        return indexes;
+    }
+
+    virtual Status set_const_arguments(const VExprContextSPtrs& /*input_exprs_ctxs*/) {
+        return Status::OK();
+    }
 
     virtual MutableColumnPtr create_serialize_column() const { return ColumnString::create(); }
 

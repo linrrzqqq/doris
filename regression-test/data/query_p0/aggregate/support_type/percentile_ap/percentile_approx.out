@@ -20,3 +20,8 @@
 -- !percentile_approx_double --
 2.718281745910645
 
+-- !percentile_approx_compression_low --
+2.718281745910645
+
+-- !percentile_approx_compression_high --
+2.718281745910645

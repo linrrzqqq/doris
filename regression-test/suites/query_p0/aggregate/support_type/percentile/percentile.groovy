@@ -55,4 +55,13 @@ suite("percentile") {
     qt_percentile_largeint """select percentile(col_largeint, 0.5) from d_table;"""
     qt_percentile_float """select percentile(col_float, 0.5) from d_table;"""
     qt_percentile_double """select percentile(col_double, 0.5) from d_table;"""
+
+    test {
+        sql """select percentile(col_double, -0.1) from d_table;"""
+        exception "percentile quantile must be in [0, 1]"
+    }
+    test {
+        sql """select percentile(col_double, 1.1) from d_table;"""
+        exception "percentile quantile must be in [0, 1]"
+    }
 }

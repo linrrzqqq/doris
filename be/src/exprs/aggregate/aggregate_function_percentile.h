@@ -29,8 +29,10 @@
 #include <vector>
 
 #include "core/assert_cast.h"
+#include "core/block/column_with_type_and_name.h"
 #include "core/column/column.h"
 #include "core/column/column_array.h"
+#include "core/column/column_const.h"
 #include "core/column/column_nullable.h"
 #include "core/column/column_vector.h"
 #include "core/data_type/data_type_array.h"
@@ -40,6 +42,7 @@
 #include "core/pod_array_fwd.h"
 #include "core/types.h"
 #include "exprs/aggregate/aggregate_function.h"
+#include "exprs/vexpr_context.h"
 #include "util/percentile_util.h"
 #include "util/tdigest.h"
 
@@ -156,6 +159,44 @@ public:
 
     String get_name() const override { return "percentile_approx"; }
 
+    const std::vector<size_t>& get_const_argument_indexes() const override {
+        static const std::vector<size_t> two_params {1};
+        static const std::vector<size_t> three_params {1, 2};
+        return this->argument_types.size() == 3 ? three_params : two_params;
+    }
+
+    Status set_const_arguments(const VExprContextSPtrs& input_exprs_ctxs) override {
+        ColumnWithTypeAndName argument;
+        RETURN_IF_ERROR(input_exprs_ctxs[1]->execute_const_expr(argument));
+        const auto& const_quantile =
+                assert_cast<const ColumnConst&, TypeCheckOnRelease::DISABLE>(*argument.column);
+        const IColumn* quantile_column = &const_quantile.get_data_column();
+        if (const auto* nullable_column =
+                    check_and_get_column<ColumnNullable>(*const_quantile.get_data_column_ptr())) {
+            quantile_column = &nullable_column->get_nested_column();
+        }
+        _quantile = assert_cast<const ColumnFloat64&, TypeCheckOnRelease::DISABLE>(*quantile_column)
+                            .get_data()[0];
+        RETURN_IF_CATCH_EXCEPTION(check_quantile(_quantile));
+        if (this->argument_types.size() == 3) {
+            RETURN_IF_ERROR(input_exprs_ctxs[2]->execute_const_expr(argument));
+            const auto& const_compression =
+                    assert_cast<const ColumnConst&, TypeCheckOnRelease::DISABLE>(*argument.column);
+            const IColumn* compression_column = &const_compression.get_data_column();
+            if (const auto* nullable_column = check_and_get_column<ColumnNullable>(
+                        *const_compression.get_data_column_ptr())) {
+                compression_column = &nullable_column->get_nested_column();
+            }
+            _compression = static_cast<float>(
+                    assert_cast<const ColumnFloat64&, TypeCheckOnRelease::DISABLE>(
+                            *compression_column)
+                            .get_data()[0]);
+        } else {
+            _compression = 10000;
+        }
+        return Status::OK();
+    }
+
     void reset(AggregateDataPtr __restrict place) const override { this->data(place).reset(); }
 
     void merge(AggregateDataPtr __restrict place, ConstAggregateDataPtr rhs,
@@ -171,6 +212,10 @@ public:
                      Arena&) const override {
         this->data(place).read(buf);
     }
+
+protected:
+    double _quantile = 0.0;
+    float _compression = 10000;
 };
 
 class AggregateFunctionPercentileApproxTwoParams final
@@ -185,9 +230,7 @@ public:
              Arena&) const override {
         const auto& sources =
                 assert_cast<const ColumnFloat64&, TypeCheckOnRelease::DISABLE>(*columns[0]);
-        const auto& quantile =
-                assert_cast<const ColumnFloat64&, TypeCheckOnRelease::DISABLE>(*columns[1]);
-        this->data(place).init(quantile.get_element(0));
+        this->data(place).init(this->_quantile);
         this->data(place).add(sources.get_element(row_num));
     }
 
@@ -218,13 +261,7 @@ public:
              Arena&) const override {
         const auto& sources =
                 assert_cast<const ColumnFloat64&, TypeCheckOnRelease::DISABLE>(*columns[0]);
-        const auto& quantile =
-                assert_cast<const ColumnFloat64&, TypeCheckOnRelease::DISABLE>(*columns[1]);
-        const auto& compression =
-                assert_cast<const ColumnFloat64&, TypeCheckOnRelease::DISABLE>(*columns[2]);
-
-        this->data(place).init(quantile.get_element(0),
-                               static_cast<float>(compression.get_element(0)));
+        this->data(place).init(this->_quantile, this->_compression);
         this->data(place).add(sources.get_element(row_num));
     }
 
@@ -252,16 +289,37 @@ public:
             : AggregateFunctionPercentileApproxBase<
                       AggregateFunctionPercentileApproxWeightedThreeParams>(argument_types_) {}
 
+    const std::vector<size_t>& get_const_argument_indexes() const override {
+        static const std::vector<size_t> indexes {2};
+        return indexes;
+    }
+
+    Status set_const_arguments(const VExprContextSPtrs& input_exprs_ctxs) override {
+        ColumnWithTypeAndName argument;
+        RETURN_IF_ERROR(input_exprs_ctxs[2]->execute_const_expr(argument));
+        const auto& const_quantile =
+                assert_cast<const ColumnConst&, TypeCheckOnRelease::DISABLE>(*argument.column);
+        const IColumn* quantile_column = &const_quantile.get_data_column();
+        if (const auto* nullable_column =
+                    check_and_get_column<ColumnNullable>(*const_quantile.get_data_column_ptr())) {
+            quantile_column = &nullable_column->get_nested_column();
+        }
+        this->_quantile =
+                assert_cast<const ColumnFloat64&, TypeCheckOnRelease::DISABLE>(*quantile_column)
+                        .get_data()[0];
+        RETURN_IF_CATCH_EXCEPTION(check_quantile(this->_quantile));
+        this->_compression = 10000;
+        return Status::OK();
+    }
+
     void add(AggregateDataPtr __restrict place, const IColumn** columns, ssize_t row_num,
              Arena&) const override {
         const auto& sources =
                 assert_cast<const ColumnFloat64&, TypeCheckOnRelease::DISABLE>(*columns[0]);
         const auto& weight =
                 assert_cast<const ColumnFloat64&, TypeCheckOnRelease::DISABLE>(*columns[1]);
-        const auto& quantile =
-                assert_cast<const ColumnFloat64&, TypeCheckOnRelease::DISABLE>(*columns[2]);
 
-        this->data(place).init(quantile.get_element(0));
+        this->data(place).init(this->_quantile);
         this->data(place).add_with_weight(sources.get_element(row_num),
                                           weight.get_element(row_num));
     }
@@ -289,19 +347,48 @@ public:
     AggregateFunctionPercentileApproxWeightedFourParams(const DataTypes& argument_types_)
             : AggregateFunctionPercentileApproxBase<
                       AggregateFunctionPercentileApproxWeightedFourParams>(argument_types_) {}
+
+    const std::vector<size_t>& get_const_argument_indexes() const override {
+        static const std::vector<size_t> indexes {2, 3};
+        return indexes;
+    }
+
+    Status set_const_arguments(const VExprContextSPtrs& input_exprs_ctxs) override {
+        ColumnWithTypeAndName argument;
+        RETURN_IF_ERROR(input_exprs_ctxs[2]->execute_const_expr(argument));
+        const auto& const_quantile =
+                assert_cast<const ColumnConst&, TypeCheckOnRelease::DISABLE>(*argument.column);
+        const IColumn* quantile_column = &const_quantile.get_data_column();
+        if (const auto* nullable_column =
+                    check_and_get_column<ColumnNullable>(*const_quantile.get_data_column_ptr())) {
+            quantile_column = &nullable_column->get_nested_column();
+        }
+        this->_quantile =
+                assert_cast<const ColumnFloat64&, TypeCheckOnRelease::DISABLE>(*quantile_column)
+                        .get_data()[0];
+        RETURN_IF_CATCH_EXCEPTION(check_quantile(this->_quantile));
+        RETURN_IF_ERROR(input_exprs_ctxs[3]->execute_const_expr(argument));
+        const auto& const_compression =
+                assert_cast<const ColumnConst&, TypeCheckOnRelease::DISABLE>(*argument.column);
+        const IColumn* compression_column = &const_compression.get_data_column();
+        if (const auto* nullable_column = check_and_get_column<ColumnNullable>(
+                    *const_compression.get_data_column_ptr())) {
+            compression_column = &nullable_column->get_nested_column();
+        }
+        this->_compression = static_cast<float>(
+                assert_cast<const ColumnFloat64&, TypeCheckOnRelease::DISABLE>(*compression_column)
+                        .get_data()[0]);
+        return Status::OK();
+    }
+
     void add(AggregateDataPtr __restrict place, const IColumn** columns, ssize_t row_num,
              Arena&) const override {
         const auto& sources =
                 assert_cast<const ColumnFloat64&, TypeCheckOnRelease::DISABLE>(*columns[0]);
         const auto& weight =
                 assert_cast<const ColumnFloat64&, TypeCheckOnRelease::DISABLE>(*columns[1]);
-        const auto& quantile =
-                assert_cast<const ColumnFloat64&, TypeCheckOnRelease::DISABLE>(*columns[2]);
-        const auto& compression =
-                assert_cast<const ColumnFloat64&, TypeCheckOnRelease::DISABLE>(*columns[3]);
 
-        this->data(place).init(quantile.get_element(0),
-                               static_cast<float>(compression.get_element(0)));
+        this->data(place).init(this->_quantile, this->_compression);
         this->data(place).add_with_weight(sources.get_element(row_num),
                                           weight.get_element(row_num));
     }
@@ -361,18 +448,24 @@ struct PercentileState {
         }
     }
 
+    void add(typename PrimitiveTypeTraits<T>::CppType source, const Float64& q) {
+        if (!inited_flag) {
+            inited_flag = true;
+            vec_counts.resize(1);
+            vec_quantile.resize(1);
+            check_quantile(q);
+            vec_quantile[0] = q;
+        }
+        vec_counts[0].increment(source);
+    }
+
     void add(typename PrimitiveTypeTraits<T>::CppType source,
-             const PaddedPODArray<Float64>& quantiles, const NullMap& null_maps, int64_t arg_size) {
+             const PaddedPODArray<Float64>& quantiles, int64_t arg_size) {
         if (!inited_flag) {
             vec_counts.resize(arg_size);
             vec_quantile.resize(arg_size, -1);
             inited_flag = true;
             for (int i = 0; i < arg_size; ++i) {
-                // throw Exception func call percentile_array(id, [1,0,null])
-                if (null_maps[i]) {
-                    throw Exception(ErrorCode::INVALID_ARGUMENT,
-                                    "quantiles in func percentile_array should not have null");
-                }
                 check_quantile(quantiles[i]);
                 vec_quantile[i] = quantiles[i];
             }
@@ -444,10 +537,9 @@ struct PercentileExactState {
     }
 
     void add_many_range(const ValueType* data, size_t count,
-                        const PaddedPODArray<Float64>& quantiles_data, const NullMap& null_maps,
-                        size_t start, int64_t arg_size) {
+                        const PaddedPODArray<Float64>& quantiles_data, int64_t arg_size) {
         if (!inited_flag) {
-            _set_many_levels(quantiles_data, null_maps, start, arg_size);
+            _set_many_levels(quantiles_data, arg_size);
             inited_flag = true;
         }
         if (levels.empty()) {
@@ -566,19 +658,14 @@ private:
         levels.permutation.push_back(0);
     }
 
-    void _set_many_levels(const PaddedPODArray<Float64>& quantiles_data, const NullMap& null_maps,
-                          size_t start, int64_t arg_size) {
+    void _set_many_levels(const PaddedPODArray<Float64>& quantiles_data, int64_t arg_size) {
         DCHECK(levels.empty());
         size_t size = cast_set<size_t>(arg_size);
         levels.quantiles.resize(size);
         levels.permutation.resize(size);
         for (size_t i = 0; i < size; ++i) {
-            if (null_maps[start + i]) {
-                throw Exception(ErrorCode::INVALID_ARGUMENT,
-                                "quantiles in func percentile_array should not have null");
-            }
-            check_quantile(quantiles_data[start + i]);
-            levels.quantiles[i] = quantiles_data[start + i];
+            check_quantile(quantiles_data[i]);
+            levels.quantiles[i] = quantiles_data[i];
             levels.permutation[i] = i;
         }
     }
@@ -587,8 +674,7 @@ private:
         if (count == 0) {
             return;
         }
-        values.reserve(values.size() + count);
-        values.insert_assume_reserved(data, data + count);
+        values.insert(data, data + count);
     }
 
     double _get_result(double quantile) const {
@@ -630,25 +716,40 @@ public:
 
     DataTypePtr get_return_type() const override { return std::make_shared<DataTypeFloat64>(); }
 
+    const std::vector<size_t>& get_const_argument_indexes() const override {
+        static const std::vector<size_t> indexes {1};
+        return indexes;
+    }
+
+    Status set_const_arguments(const VExprContextSPtrs& input_exprs_ctxs) override {
+        ColumnWithTypeAndName argument;
+        RETURN_IF_ERROR(input_exprs_ctxs[1]->execute_const_expr(argument));
+        const auto& const_quantile =
+                assert_cast<const ColumnConst&, TypeCheckOnRelease::DISABLE>(*argument.column);
+        const IColumn* quantile_column = &const_quantile.get_data_column();
+        if (const auto* nullable_column =
+                    check_and_get_column<ColumnNullable>(*const_quantile.get_data_column_ptr())) {
+            quantile_column = &nullable_column->get_nested_column();
+        }
+        _quantile = assert_cast<const ColumnFloat64&, TypeCheckOnRelease::DISABLE>(*quantile_column)
+                            .get_data()[0];
+        RETURN_IF_CATCH_EXCEPTION(check_quantile(_quantile));
+        return Status::OK();
+    }
+
     void add(AggregateDataPtr __restrict place, const IColumn** columns, ssize_t row_num,
              Arena&) const override {
         const auto& sources =
                 assert_cast<const ColVecType&, TypeCheckOnRelease::DISABLE>(*columns[0]);
-        const auto& quantile =
-                assert_cast<const ColumnFloat64&, TypeCheckOnRelease::DISABLE>(*columns[1]);
-        AggregateFunctionPercentile::data(place).add(sources.get_data()[row_num],
-                                                     quantile.get_data(), NullMap(1, 0), 1);
+        AggregateFunctionPercentile::data(place).add(sources.get_data()[row_num], _quantile);
     }
 
     void add_batch_single_place(size_t batch_size, AggregateDataPtr place, const IColumn** columns,
                                 Arena&) const override {
         const auto& sources =
                 assert_cast<const ColVecType&, TypeCheckOnRelease::DISABLE>(*columns[0]);
-        const auto& quantile =
-                assert_cast<const ColumnFloat64&, TypeCheckOnRelease::DISABLE>(*columns[1]);
         DCHECK_EQ(sources.get_data().size(), batch_size);
-        AggregateFunctionPercentile::data(place).add_batch(sources.get_data(),
-                                                           quantile.get_data()[0]);
+        AggregateFunctionPercentile::data(place).add_batch(sources.get_data(), _quantile);
     }
 
     void reset(AggregateDataPtr __restrict place) const override {
@@ -673,6 +774,9 @@ public:
         auto& col = assert_cast<ColumnFloat64&>(to);
         col.insert_value(AggregateFunctionPercentile::data(place).get());
     }
+
+private:
+    double _quantile = 0.0;
 };
 
 template <PrimitiveType T>
@@ -693,25 +797,50 @@ public:
         return std::make_shared<DataTypeArray>(make_nullable(std::make_shared<DataTypeFloat64>()));
     }
 
+    const std::vector<size_t>& get_const_argument_indexes() const override {
+        static const std::vector<size_t> indexes {1};
+        return indexes;
+    }
+
+    Status set_const_arguments(const VExprContextSPtrs& input_exprs_ctxs) override {
+        ColumnWithTypeAndName argument;
+        RETURN_IF_ERROR(input_exprs_ctxs[1]->execute_const_expr(argument));
+        const auto& const_quantiles =
+                assert_cast<const ColumnConst&, TypeCheckOnRelease::DISABLE>(*argument.column);
+        const IColumn* quantiles_column = &const_quantiles.get_data_column();
+        if (const auto* nullable_column =
+                    check_and_get_column<ColumnNullable>(*const_quantiles.get_data_column_ptr())) {
+            quantiles_column = &nullable_column->get_nested_column();
+        }
+        const auto& quantile_array =
+                assert_cast<const ColumnArray&, TypeCheckOnRelease::DISABLE>(*quantiles_column);
+        const auto& offset_column_data = quantile_array.get_offsets();
+        const auto& nullable_quantiles =
+                assert_cast<const ColumnNullable&, TypeCheckOnRelease::DISABLE>(
+                        quantile_array.get_data());
+        const auto& null_map = nullable_quantiles.get_null_map_data();
+        for (size_t i = 0; i < offset_column_data[0]; ++i) {
+            if (null_map[i]) {
+                return Status::InvalidArgument("percentile_array quantile should not be null");
+            }
+        }
+        const auto& quantile_data = assert_cast<const ColumnFloat64&, TypeCheckOnRelease::DISABLE>(
+                                            nullable_quantiles.get_nested_column())
+                                            .get_data();
+        _quantiles_size = cast_set<int64_t>(offset_column_data[0]);
+        _quantiles_data.assign(quantile_data.begin(), quantile_data.begin() + _quantiles_size);
+        for (size_t i = 0; i < _quantiles_size; ++i) {
+            RETURN_IF_CATCH_EXCEPTION(check_quantile(_quantiles_data[i]));
+        }
+        return Status::OK();
+    }
+
     void add(AggregateDataPtr __restrict place, const IColumn** columns, ssize_t row_num,
              Arena&) const override {
         const auto& sources =
                 assert_cast<const ColVecType&, TypeCheckOnRelease::DISABLE>(*columns[0]);
-        const auto& quantile_array =
-                assert_cast<const ColumnArray&, TypeCheckOnRelease::DISABLE>(*columns[1]);
-        const auto& offset_column_data = quantile_array.get_offsets();
-        const auto& null_maps = assert_cast<const ColumnNullable&, TypeCheckOnRelease::DISABLE>(
-                                        quantile_array.get_data())
-                                        .get_null_map_data();
-        const auto& nested_column = assert_cast<const ColumnNullable&, TypeCheckOnRelease::DISABLE>(
-                                            quantile_array.get_data())
-                                            .get_nested_column();
-        const auto& nested_column_data =
-                assert_cast<const ColumnFloat64&, TypeCheckOnRelease::DISABLE>(nested_column);
-
-        AggregateFunctionPercentileArray::data(place).add(
-                sources.get_element(row_num), nested_column_data.get_data(), null_maps,
-                offset_column_data.data()[row_num] - offset_column_data[(ssize_t)row_num - 1]);
+        AggregateFunctionPercentileArray::data(place).add(sources.get_element(row_num),
+                                                          _quantiles_data, _quantiles_size);
     }
 
     void reset(AggregateDataPtr __restrict place) const override {
@@ -746,6 +875,10 @@ public:
         }
         to_arr.get_offsets().push_back(to_nested_col.size());
     }
+
+private:
+    PaddedPODArray<Float64> _quantiles_data;
+    int64_t _quantiles_size = 0;
 };
 
 template <PrimitiveType T>
@@ -764,37 +897,51 @@ public:
 
     DataTypePtr get_return_type() const override { return std::make_shared<DataTypeFloat64>(); }
 
+    const std::vector<size_t>& get_const_argument_indexes() const override {
+        static const std::vector<size_t> indexes {1};
+        return indexes;
+    }
+
+    Status set_const_arguments(const VExprContextSPtrs& input_exprs_ctxs) override {
+        ColumnWithTypeAndName argument;
+        RETURN_IF_ERROR(input_exprs_ctxs[1]->execute_const_expr(argument));
+        const auto& const_quantile =
+                assert_cast<const ColumnConst&, TypeCheckOnRelease::DISABLE>(*argument.column);
+        const IColumn* quantile_column = &const_quantile.get_data_column();
+        if (const auto* nullable_column =
+                    check_and_get_column<ColumnNullable>(*const_quantile.get_data_column_ptr())) {
+            quantile_column = &nullable_column->get_nested_column();
+        }
+        _quantile = assert_cast<const ColumnFloat64&, TypeCheckOnRelease::DISABLE>(*quantile_column)
+                            .get_data()[0];
+        RETURN_IF_CATCH_EXCEPTION(check_quantile(_quantile));
+        return Status::OK();
+    }
+
     void add(AggregateDataPtr __restrict place, const IColumn** columns, ssize_t row_num,
              Arena&) const override {
         const auto& sources =
                 assert_cast<const ColVecType&, TypeCheckOnRelease::DISABLE>(*columns[0]);
-        const auto& quantile =
-                assert_cast<const ColumnFloat64&, TypeCheckOnRelease::DISABLE>(*columns[1]);
         AggregateFunctionPercentileV2::data(place).add_single_range(&sources.get_data()[row_num], 1,
-                                                                    quantile.get_data()[0]);
+                                                                    _quantile);
     }
 
     void add_batch_single_place(size_t batch_size, AggregateDataPtr place, const IColumn** columns,
                                 Arena&) const override {
         const auto& sources =
                 assert_cast<const ColVecType&, TypeCheckOnRelease::DISABLE>(*columns[0]);
-        const auto& quantile =
-                assert_cast<const ColumnFloat64&, TypeCheckOnRelease::DISABLE>(*columns[1]);
         DCHECK_EQ(sources.get_data().size(), batch_size);
-        AggregateFunctionPercentileV2::data(place).add_single_range(
-                sources.get_data().data(), batch_size, quantile.get_data()[0]);
+        AggregateFunctionPercentileV2::data(place).add_single_range(sources.get_data().data(),
+                                                                    batch_size, _quantile);
     }
 
     void add_batch_range(size_t batch_begin, size_t batch_end, AggregateDataPtr place,
                          const IColumn** columns, Arena&, bool has_null) override {
         const auto& sources =
                 assert_cast<const ColVecType&, TypeCheckOnRelease::DISABLE>(*columns[0]);
-        const auto& quantile =
-                assert_cast<const ColumnFloat64&, TypeCheckOnRelease::DISABLE>(*columns[1]);
         DCHECK(!has_null);
         AggregateFunctionPercentileV2::data(place).add_single_range(
-                sources.get_data().data() + batch_begin, batch_end - batch_begin + 1,
-                quantile.get_data()[0]);
+                sources.get_data().data() + batch_begin, batch_end - batch_begin + 1, _quantile);
     }
 
     void reset(AggregateDataPtr __restrict place) const override {
@@ -819,6 +966,9 @@ public:
         auto& col = assert_cast<ColumnFloat64&>(to);
         col.insert_value(AggregateFunctionPercentileV2::data(place).get());
     }
+
+private:
+    double _quantile = 0.0;
 };
 
 template <PrimitiveType T>
@@ -839,69 +989,69 @@ public:
         return std::make_shared<DataTypeArray>(make_nullable(std::make_shared<DataTypeFloat64>()));
     }
 
+    const std::vector<size_t>& get_const_argument_indexes() const override {
+        static const std::vector<size_t> indexes {1};
+        return indexes;
+    }
+
+    Status set_const_arguments(const VExprContextSPtrs& input_exprs_ctxs) override {
+        ColumnWithTypeAndName argument;
+        RETURN_IF_ERROR(input_exprs_ctxs[1]->execute_const_expr(argument));
+        const auto& const_quantiles =
+                assert_cast<const ColumnConst&, TypeCheckOnRelease::DISABLE>(*argument.column);
+        const IColumn* quantiles_column = &const_quantiles.get_data_column();
+        if (const auto* nullable_column =
+                    check_and_get_column<ColumnNullable>(*const_quantiles.get_data_column_ptr())) {
+            quantiles_column = &nullable_column->get_nested_column();
+        }
+        const auto& quantile_array =
+                assert_cast<const ColumnArray&, TypeCheckOnRelease::DISABLE>(*quantiles_column);
+        const auto& offset_column_data = quantile_array.get_offsets();
+        const auto& nullable_quantiles =
+                assert_cast<const ColumnNullable&, TypeCheckOnRelease::DISABLE>(
+                        quantile_array.get_data());
+        const auto& null_map = nullable_quantiles.get_null_map_data();
+        for (size_t i = 0; i < offset_column_data[0]; ++i) {
+            if (null_map[i]) {
+                return Status::InvalidArgument("percentile_array quantile should not be null");
+            }
+        }
+        const auto& quantile_data = assert_cast<const ColumnFloat64&, TypeCheckOnRelease::DISABLE>(
+                                            nullable_quantiles.get_nested_column())
+                                            .get_data();
+        _quantiles_size = cast_set<int64_t>(offset_column_data[0]);
+        _quantiles_data.assign(quantile_data.begin(), quantile_data.begin() + _quantiles_size);
+        for (size_t i = 0; i < _quantiles_size; ++i) {
+            RETURN_IF_CATCH_EXCEPTION(check_quantile(_quantiles_data[i]));
+        }
+        return Status::OK();
+    }
+
     void add(AggregateDataPtr __restrict place, const IColumn** columns, ssize_t row_num,
              Arena&) const override {
         const auto& sources =
                 assert_cast<const ColVecType&, TypeCheckOnRelease::DISABLE>(*columns[0]);
-        const auto& quantile_array =
-                assert_cast<const ColumnArray&, TypeCheckOnRelease::DISABLE>(*columns[1]);
-        const auto& offset_column_data = quantile_array.get_offsets();
-        const auto& null_maps = assert_cast<const ColumnNullable&, TypeCheckOnRelease::DISABLE>(
-                                        quantile_array.get_data())
-                                        .get_null_map_data();
-        const auto& nested_column = assert_cast<const ColumnNullable&, TypeCheckOnRelease::DISABLE>(
-                                            quantile_array.get_data())
-                                            .get_nested_column();
-        const auto& nested_column_data =
-                assert_cast<const ColumnFloat64&, TypeCheckOnRelease::DISABLE>(nested_column);
-        size_t start = row_num == 0 ? 0 : offset_column_data[row_num - 1];
         AggregateFunctionPercentileArrayV2::data(place).add_many_range(
-                &sources.get_data()[row_num], 1, nested_column_data.get_data(), null_maps, start,
-                cast_set<int64_t>(offset_column_data[row_num] - start));
+                &sources.get_data()[row_num], 1, _quantiles_data, _quantiles_size);
     }
 
     void add_batch_single_place(size_t batch_size, AggregateDataPtr place, const IColumn** columns,
                                 Arena&) const override {
         const auto& sources =
                 assert_cast<const ColVecType&, TypeCheckOnRelease::DISABLE>(*columns[0]);
-        const auto& quantile_array =
-                assert_cast<const ColumnArray&, TypeCheckOnRelease::DISABLE>(*columns[1]);
-        const auto& offset_column_data = quantile_array.get_offsets();
-        const auto& null_maps = assert_cast<const ColumnNullable&, TypeCheckOnRelease::DISABLE>(
-                                        quantile_array.get_data())
-                                        .get_null_map_data();
-        const auto& nested_column = assert_cast<const ColumnNullable&, TypeCheckOnRelease::DISABLE>(
-                                            quantile_array.get_data())
-                                            .get_nested_column();
-        const auto& nested_column_data =
-                assert_cast<const ColumnFloat64&, TypeCheckOnRelease::DISABLE>(nested_column);
         DCHECK_EQ(sources.get_data().size(), batch_size);
         AggregateFunctionPercentileArrayV2::data(place).add_many_range(
-                sources.get_data().data(), batch_size, nested_column_data.get_data(), null_maps, 0,
-                cast_set<int64_t>(offset_column_data[0]));
+                sources.get_data().data(), batch_size, _quantiles_data, _quantiles_size);
     }
 
     void add_batch_range(size_t batch_begin, size_t batch_end, AggregateDataPtr place,
                          const IColumn** columns, Arena&, bool has_null) override {
         const auto& sources =
                 assert_cast<const ColVecType&, TypeCheckOnRelease::DISABLE>(*columns[0]);
-        const auto& quantile_array =
-                assert_cast<const ColumnArray&, TypeCheckOnRelease::DISABLE>(*columns[1]);
-        const auto& offset_column_data = quantile_array.get_offsets();
-        const auto& null_maps = assert_cast<const ColumnNullable&, TypeCheckOnRelease::DISABLE>(
-                                        quantile_array.get_data())
-                                        .get_null_map_data();
-        const auto& nested_column = assert_cast<const ColumnNullable&, TypeCheckOnRelease::DISABLE>(
-                                            quantile_array.get_data())
-                                            .get_nested_column();
-        const auto& nested_column_data =
-                assert_cast<const ColumnFloat64&, TypeCheckOnRelease::DISABLE>(nested_column);
         DCHECK(!has_null);
-        size_t start = batch_begin == 0 ? 0 : offset_column_data[batch_begin - 1];
         AggregateFunctionPercentileArrayV2::data(place).add_many_range(
                 sources.get_data().data() + batch_begin, batch_end - batch_begin + 1,
-                nested_column_data.get_data(), null_maps, start,
-                cast_set<int64_t>(offset_column_data[batch_begin] - start));
+                _quantiles_data, _quantiles_size);
     }
 
     void reset(AggregateDataPtr __restrict place) const override {
@@ -936,6 +1086,10 @@ public:
         }
         to_arr.get_offsets().push_back(to_nested_col.size());
     }
+
+private:
+    PaddedPODArray<Float64> _quantiles_data;
+    int64_t _quantiles_size = 0;
 };
 
 } // namespace doris
