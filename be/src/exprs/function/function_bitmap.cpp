@@ -30,6 +30,7 @@
 #include <memory>
 #include <ostream>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -323,14 +324,20 @@ struct BitmapFromArray {
         const auto& nested_column_data = static_cast<const ColumnType&>(nested_column).get_data();
         auto size = offset_column_data.size();
         res.reserve(size);
-        std::vector<uint64_t> bits;
+        using ValueType = typename ColumnType::value_type;
+        std::vector<ValueType> bits;
+        ColumnArray::Offset64 prev_offset = 0;
         for (size_t i = 0; i < size; ++i) {
             auto curr_offset = offset_column_data[i];
-            auto prev_offset = offset_column_data[i - 1];
+            bits.reserve(curr_offset - prev_offset);
             for (auto j = prev_offset; j < curr_offset; ++j) {
                 auto data = nested_column_data[j];
+                bool invalid = nested_null_map[j];
+                if constexpr (std::is_signed_v<ValueType>) {
+                    invalid |= data < 0;
+                }
                 // invaild value
-                if (UNLIKELY(data < 0) || UNLIKELY(nested_null_map[j])) {
+                if (UNLIKELY(invalid)) {
                     res.emplace_back();
                     null_map[i] = 1;
                     break;
@@ -343,6 +350,7 @@ struct BitmapFromArray {
                 res.emplace_back(bits);
             }
             bits.clear();
+            prev_offset = curr_offset;
         }
         return Status::OK();
     }
@@ -637,32 +645,20 @@ struct BitmapAndNotCount {
 
     static void vector_vector(const TData& lvec, const TData& rvec, ResTData* res) {
         size_t size = lvec.size();
-        BitmapValue mid_data;
         for (size_t i = 0; i < size; ++i) {
-            mid_data = lvec[i];
-            mid_data &= rvec[i];
-            res[i] = lvec[i].andnot_cardinality(mid_data);
-            mid_data.reset();
+            res[i] = lvec[i].andnot_cardinality(rvec[i]);
         }
     }
     static void scalar_vector(const BitmapValue& lval, const TData& rvec, ResTData* res) {
         size_t size = rvec.size();
-        BitmapValue mid_data;
         for (size_t i = 0; i < size; ++i) {
-            mid_data = lval;
-            mid_data &= rvec[i];
-            res[i] = lval.andnot_cardinality(mid_data);
-            mid_data.reset();
+            res[i] = lval.andnot_cardinality(rvec[i]);
         }
     }
     static void vector_scalar(const TData& lvec, const BitmapValue& rval, ResTData* res) {
         size_t size = lvec.size();
-        BitmapValue mid_data;
         for (size_t i = 0; i < size; ++i) {
-            mid_data = lvec[i];
-            mid_data &= rval;
-            res[i] = lvec[i].andnot_cardinality(mid_data);
-            mid_data.reset();
+            res[i] = lvec[i].andnot_cardinality(rval);
         }
     }
 };
@@ -746,16 +742,7 @@ public:
     String get_name() const override { return name; }
     size_t get_number_of_arguments() const override { return 2; }
     DataTypePtr get_return_type_impl(const DataTypes& arguments) const override {
-        bool return_nullable = false;
-        // result is nullable only when any columns is nullable for bitmap_and_not_count
-        for (size_t i = 0; i < arguments.size(); ++i) {
-            if (arguments[i]->is_nullable()) {
-                return_nullable = true;
-                break;
-            }
-        }
-        auto result_type = std::make_shared<ResultDataType>();
-        return return_nullable ? make_nullable(result_type) : result_type;
+        return std::make_shared<ResultDataType>();
     }
 
     bool use_default_implementation_for_nulls() const override {
@@ -904,25 +891,19 @@ struct BitmapHasAny {
     static void vector_vector(const TData& lvec, const TData& rvec, ResTData& res) {
         size_t size = lvec.size();
         for (size_t i = 0; i < size; ++i) {
-            auto bitmap = lvec[i];
-            bitmap &= rvec[i];
-            res[i] = bitmap.cardinality() != 0;
+            res[i] = lvec[i].intersects(rvec[i]);
         }
     }
     static void vector_scalar(const TData& lvec, const BitmapValue& rval, ResTData& res) {
         size_t size = lvec.size();
         for (size_t i = 0; i < size; ++i) {
-            auto bitmap = lvec[i];
-            bitmap &= rval;
-            res[i] = bitmap.cardinality() != 0;
+            res[i] = lvec[i].intersects(rval);
         }
     }
     static void scalar_vector(const BitmapValue& lval, const TData& rvec, ResTData& res) {
         size_t size = rvec.size();
         for (size_t i = 0; i < size; ++i) {
-            auto bitmap = lval;
-            bitmap &= rvec[i];
-            res[i] = bitmap.cardinality() != 0;
+            res[i] = lval.intersects(rvec[i]);
         }
     }
 };
@@ -942,28 +923,19 @@ struct BitmapHasAll {
     static void vector_vector(const TData& lvec, const TData& rvec, ResTData& res) {
         size_t size = lvec.size();
         for (size_t i = 0; i < size; ++i) {
-            uint64_t lhs_cardinality = lvec[i].cardinality();
-            auto bitmap = lvec[i];
-            bitmap |= rvec[i];
-            res[i] = bitmap.cardinality() == lhs_cardinality;
+            res[i] = lvec[i].contains_all(rvec[i]);
         }
     }
     static void vector_scalar(const TData& lvec, const BitmapValue& rval, ResTData& res) {
         size_t size = lvec.size();
         for (size_t i = 0; i < size; ++i) {
-            uint64_t lhs_cardinality = lvec[i].cardinality();
-            auto bitmap = lvec[i];
-            bitmap |= rval;
-            res[i] = bitmap.cardinality() == lhs_cardinality;
+            res[i] = lvec[i].contains_all(rval);
         }
     }
     static void scalar_vector(const BitmapValue& lval, const TData& rvec, ResTData& res) {
         size_t size = rvec.size();
-        uint64_t lhs_cardinality = lval.cardinality();
         for (size_t i = 0; i < size; ++i) {
-            auto bitmap = lval;
-            bitmap |= rvec[i];
-            res[i] = bitmap.cardinality() == lhs_cardinality;
+            res[i] = lval.contains_all(rvec[i]);
         }
     }
 };
