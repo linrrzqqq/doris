@@ -42,6 +42,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
 public class OlapTableStream extends BaseTableStream {
@@ -158,7 +159,7 @@ public class OlapTableStream extends BaseTableStream {
     }
 
     @Override
-    void fillTableStreamConsumptionInfo(List<TRow> dataBatch) {
+    void fillTableStreamConsumptionInfo(List<TRow> dataBatch, Predicate<String> unitSelector) {
         OlapTable table = getBaseTableNullable();
         if (table == null) {
             return;
@@ -172,6 +173,9 @@ public class OlapTableStream extends BaseTableStream {
                         HashMap::new
                 ));
                 for (Map.Entry<Long, Partition> entry : id2name.entrySet()) {
+                    if (!unitSelector.test(entry.getValue().getName())) {
+                        continue;
+                    }
                     TRow trow = new TRow();
                     // DB_NAME
                     trow.addToColumnValue(new TCell().setStringVal(qualifiedDbName));

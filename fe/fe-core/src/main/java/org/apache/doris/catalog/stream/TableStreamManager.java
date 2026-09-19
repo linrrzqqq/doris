@@ -64,6 +64,13 @@ import java.util.concurrent.locks.LockSupport;
 public class TableStreamManager extends MasterDaemon implements Writable, GsonPostProcessable {
     private static final Logger LOG = LogManager.getLogger(TableStreamManager.class);
     private static final String BASE_TABLE_NOT_FOUND_STALE_REASON = "Base table does not exist";
+
+    @FunctionalInterface
+    public interface StreamConsumptionSelector {
+        // unit is null while selecting a stream, and is set after its base-table partitions are known.
+        boolean test(String dbName, String streamName, long streamId, String unit);
+    }
+
     @SerializedName(value = "dbStreamMap")
     private Map<Long, Set<Long>> dbStreamMap;
     protected MonitoredReentrantReadWriteLock rwLock;
@@ -397,8 +404,13 @@ public class TableStreamManager extends MasterDaemon implements Writable, GsonPo
     }
 
     public void fillStreamConsumptionValuesMetadataResult(List<TRow> dataBatch) throws UserException {
+        fillStreamConsumptionValuesMetadataResult(dataBatch, (dbName, streamName, streamId, unit) -> true);
+    }
+
+    public void fillStreamConsumptionValuesMetadataResult(List<TRow> dataBatch,
+            StreamConsumptionSelector selector) throws UserException {
         if (Config.isCloudMode()) {
-            fillCloudStreamConsumptionValuesMetadataResult(dataBatch);
+            fillCloudStreamConsumptionValuesMetadataResult(dataBatch, selector);
             return;
         }
         for (Map.Entry<Long, Set<Long>> entry : copyDbStreamMap().entrySet()) {
@@ -414,9 +426,14 @@ public class TableStreamManager extends MasterDaemon implements Writable, GsonPo
                     }
                     Preconditions.checkArgument(table.get() instanceof BaseTableStream);
                     BaseTableStream stream = (BaseTableStream) table.get();
+                    if (!selector.test(db.get().getFullName(), stream.getName(), stream.getId(), null)) {
+                        continue;
+                    }
                     if (stream.readLockIfExist()) {
                         try {
-                            stream.fillTableStreamConsumptionInfo(dataBatch);
+                            stream.fillTableStreamConsumptionInfo(dataBatch,
+                                    unit -> selector.test(db.get().getFullName(), stream.getName(), stream.getId(),
+                                            unit));
                         } finally {
                             stream.readUnlock();
                         }
@@ -426,7 +443,8 @@ public class TableStreamManager extends MasterDaemon implements Writable, GsonPo
         }
     }
 
-    private void fillCloudStreamConsumptionValuesMetadataResult(List<TRow> dataBatch) throws UserException {
+    private void fillCloudStreamConsumptionValuesMetadataResult(List<TRow> dataBatch,
+            StreamConsumptionSelector selector) throws UserException {
         Map<Cloud.TableStreamIdentityPB, CloudStreamConsumptionSnapshot> snapshots = new LinkedHashMap<>();
         for (Map.Entry<Long, Set<Long>> entry : copyDbStreamMap().entrySet()) {
             Optional<Database> db = Env.getCurrentInternalCatalog().getDb(entry.getKey());
@@ -440,6 +458,9 @@ public class TableStreamManager extends MasterDaemon implements Writable, GsonPo
                 }
                 Preconditions.checkArgument(table.get() instanceof OlapTableStream);
                 OlapTableStream stream = (OlapTableStream) table.get();
+                if (!selector.test(db.get().getFullName(), stream.getName(), stream.getId(), null)) {
+                    continue;
+                }
                 if (!stream.readLockIfExist()) {
                     continue;
                 }
@@ -450,8 +471,10 @@ public class TableStreamManager extends MasterDaemon implements Writable, GsonPo
                     }
                     try {
                         Map<Long, String> partitionNames = new LinkedHashMap<>();
-                        baseTable.getPartitions().forEach(partition ->
-                                partitionNames.put(partition.getId(), partition.getName()));
+                        baseTable.getPartitions().stream()
+                                .filter(partition -> selector.test(db.get().getFullName(), stream.getName(),
+                                        stream.getId(), partition.getName()))
+                                .forEach(partition -> partitionNames.put(partition.getId(), partition.getName()));
                         if (partitionNames.isEmpty()) {
                             continue;
                         }

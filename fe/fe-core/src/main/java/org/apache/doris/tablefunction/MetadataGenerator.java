@@ -91,6 +91,7 @@ import org.apache.doris.mtmv.MTMVRelation;
 import org.apache.doris.mtmv.MTMVStatus;
 import org.apache.doris.mtmv.ivm.IvmUtil;
 import org.apache.doris.mysql.privilege.PrivPredicate;
+import org.apache.doris.nereids.analyzer.UnboundSlot;
 import org.apache.doris.nereids.trees.expressions.Expression;
 import org.apache.doris.nereids.util.FrontendConjunctsUtils;
 import org.apache.doris.nereids.util.PlanUtils;
@@ -142,17 +143,23 @@ import org.jetbrains.annotations.NotNull;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
 public class MetadataGenerator {
     private static final Logger LOG = LogManager.getLogger(MetadataGenerator.class);
+    private static final Set<String> STREAM_CONSUMPTION_STREAM_COLUMNS =
+            Set.of("DB_NAME", "STREAM_NAME", "STREAM_ID");
+    private static final Set<String> STREAM_CONSUMPTION_SELECTOR_COLUMNS =
+            Set.of("DB_NAME", "STREAM_NAME", "STREAM_ID", "UNIT");
 
     private static final ImmutableMap<String, Integer> ACTIVE_QUERIES_COLUMN_TO_INDEX;
 
@@ -2329,8 +2336,56 @@ public class MetadataGenerator {
     private static TFetchSchemaTableDataResult streamConsumptionMetadataResult(TSchemaTableRequestParams params) {
         TFetchSchemaTableDataResult result = new TFetchSchemaTableDataResult();
         List<TRow> dataBatch = Lists.newArrayList();
+        List<Expression> parsedConjuncts = Collections.emptyList();
+        if (params.isSetFrontendConjuncts()) {
+            try {
+                parsedConjuncts = FrontendConjunctsUtils.convertToExpression(params.getFrontendConjuncts());
+            } catch (RuntimeException e) {
+                LOG.warn("Failed to convert frontend conjuncts for table_stream_consumption; skip FE pruning", e);
+            }
+        }
+        List<Expression> conjuncts = parsedConjuncts;
         try {
-            Env.getCurrentEnv().getTableStreamManager().fillStreamConsumptionValuesMetadataResult(dataBatch);
+            if (conjuncts.isEmpty()) {
+                Env.getCurrentEnv().getTableStreamManager().fillStreamConsumptionValuesMetadataResult(dataBatch);
+                result.setDataBatch(dataBatch);
+                result.setStatus(new TStatus(TStatusCode.OK));
+                return result;
+            }
+            // `DB_NAME='db1'`, `STREAM_ID=10`
+            List<Expression> streamConjuncts = Lists.newArrayList();
+            // `UNIT='p1'`, `DB_NAME='db1' OR UNIT='p1'`
+            List<Expression> unitConjuncts = Lists.newArrayList();
+            for (Expression conjunct : conjuncts) {
+                Set<String> referencedColumns = new HashSet<>();
+                for (UnboundSlot slot : conjunct.<UnboundSlot>collectToList(UnboundSlot.class::isInstance)) {
+                    List<String> nameParts = slot.getNameParts();
+                    if (!nameParts.isEmpty()) {
+                        referencedColumns.add(nameParts.get(nameParts.size() - 1).toUpperCase(Locale.ROOT));
+                    }
+                }
+                if (STREAM_CONSUMPTION_STREAM_COLUMNS.containsAll(referencedColumns)) {
+                    streamConjuncts.add(conjunct);
+                } else if (referencedColumns.contains("UNIT")
+                        && STREAM_CONSUMPTION_SELECTOR_COLUMNS.containsAll(referencedColumns)) {
+                    unitConjuncts.add(conjunct);
+                }
+            }
+            Env.getCurrentEnv().getTableStreamManager().fillStreamConsumptionValuesMetadataResult(
+                    dataBatch, (dbName, streamName, streamId, unit) -> {
+                        List<Expression> currentConjuncts = unit == null ? streamConjuncts : unitConjuncts;
+                        if (currentConjuncts.isEmpty()) {
+                            return true;
+                        }
+                        TreeMap<String, Object> values = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+                        values.put("DB_NAME", dbName);
+                        values.put("STREAM_NAME", streamName);
+                        values.put("STREAM_ID", streamId);
+                        if (unit != null) {
+                            values.put("UNIT", unit);
+                        }
+                        return !FrontendConjunctsUtils.isFiltered(currentConjuncts, values);
+                    });
         } catch (UserException e) {
             return errorResult(e.getMessage());
         }
