@@ -17,6 +17,8 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
+#include <cstring>
 #include <new>
 #include <set>
 
@@ -103,6 +105,42 @@ TEST(HashTableMethodTest, testMethodFixed) {
               {0, 1, -1, 3, -1, 4});
 }
 
+TEST(HashTableMethodTest, testMethodFixedNullableInputsUnchanged) {
+    using Method = MethodKeysFixed<PHHashMap<UInt128, IColumn::ColumnIndex, HashCRC32<UInt128>>>;
+    auto source = ColumnHelper::create_column<DataTypeInt32>({7, 0, 11, 7});
+    auto null_map = ColumnHelper::create_column<DataTypeUInt8>({1, 0, 0, 1});
+    auto nullable = ColumnNullable::create(source, null_map);
+    auto second = ColumnHelper::create_column<DataTypeInt32>({5, 5, 5, 6});
+    auto canonical =
+            ColumnHelper::create_nullable_column<DataTypeInt32>({0, 0, 11, 0}, {1, 0, 0, 1});
+    ColumnRawPtrs columns {nullable.get(), second.get()};
+    ColumnRawPtrs canonical_columns {canonical.get(), second.get()};
+    const auto& source_data = assert_cast<const ColumnInt32&>(*source).get_data();
+    const std::array<Int32, 4> expected {7, 0, 11, 7};
+    const std::array<std::array<uint8_t, sizeof(UInt128)>, 4> expected_keys {{
+            {1, 0, 0, 0, 0, 5},
+            {0, 0, 0, 0, 0, 5},
+            {0, 11, 0, 0, 0, 5},
+            {1, 0, 0, 0, 0, 6},
+    }};
+
+    for (bool is_build : {true, false}) {
+        Method method(Sizes {sizeof(Int32), sizeof(Int32)});
+        Method canonical_method(Sizes {sizeof(Int32), sizeof(Int32)});
+        method.init_serialized_keys(columns, expected.size(), nullptr, false, is_build);
+        canonical_method.init_serialized_keys(canonical_columns, expected.size(), nullptr, false,
+                                              is_build);
+        for (size_t row = 0; row < expected.size(); ++row) {
+            EXPECT_EQ(source_data[row], expected[row]);
+            EXPECT_EQ(method.keys[row], canonical_method.keys[row]);
+            EXPECT_EQ(std::memcmp(&method.keys[row], expected_keys[row].data(), sizeof(UInt128)),
+                      0);
+        }
+        EXPECT_NE(method.keys[0], method.keys[1]);
+        EXPECT_NE(method.keys[0], method.keys[3]);
+    }
+}
+
 TEST(HashTableMethodTest, testMethodSerialized) {
     MethodSerialized<StringHashMap<IColumn::ColumnIndex>> method;
 
@@ -132,10 +170,6 @@ TEST(HashTableMethodTest, testMethodStringNoCache) {
               {0, 1, -1, 3, -1, 4});
 }
 
-// For join, null keys are routed to a dedicated null bucket and matched by raw key
-// comparison. The nested column of a null row may hold residual bytes left by expression
-// evaluation, so init_serialized_keys must normalize null keys to a canonical empty
-// StringRef to make null keys equal (e.g. single-column null-safe equal join).
 TEST(HashTableMethodTest, testMethodStringNoCacheNullKeyNormalized) {
     MethodStringNoCache<StringHashMap<IColumn::ColumnIndex>> method;
 

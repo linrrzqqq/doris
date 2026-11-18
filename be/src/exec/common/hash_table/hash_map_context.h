@@ -381,12 +381,8 @@ struct MethodStringNoCache : public MethodBase<TData> {
                 is_column_nullable(column)
                         ? assert_cast<const ColumnNullable&>(column).get_nested_column()
                         : column;
-        // For join, rows with null keys are routed to a dedicated null bucket and matched by
-        // raw key comparison, so their keys must be normalized to a canonical empty StringRef
-        // to make null keys equal (e.g. single-column null-safe equal join). The nested
-        // column of a null row may hold residual bytes left by expression evaluation.
-        // Real empty strings are not affected: they are not null, so they are still hashed
-        // into normal buckets and never meet the null keys in the null bucket.
+        // Represent NULL keys with an empty StringRef in the result buffer without modifying
+        // the input column, whose nested strings may contain residual expression results.
         auto serialized_str = [null_map](const auto& column_string,
                                          DorisVector<StringRef>& stored_keys) {
             const auto& offsets = column_string.get_offsets();
@@ -956,23 +952,28 @@ struct MethodKeysFixed : public MethodBase<TData> {
         for (size_t j = 0; j < key_columns.size(); ++j) {
             auto goo = [&]<typename Fixed, bool aligned>(Fixed zero) {
                 CHECK_EQ(sizeof(Fixed), key_sizes[j]);
-                if (has_null_column.size() && has_null_column[j]) {
-                    const auto* nullmap =
-                            assert_cast<const ColumnUInt8&>(*nullmap_columns[j]).get_data().data();
-                    // make sure null cell is filled by 0x0
-                    // This mutates the same underlying buffer returned by get_raw_data(), so get
-                    // the restricted data pointer only after the replacement finishes.
-                    const_cast<IColumn*>(key_columns[j])->replace_column_null_data(nullmap);
-                }
                 auto* __restrict current = result_data + offset;
                 // Do not hoist data out of goo. A reference capture is lowered to an ordinary
                 // closure field, so restrict/noalias information is lost when goo is not inlined,
                 // which prevents the copy loop from being optimized.
                 const char* __restrict data = key_columns[j]->get_raw_data().data;
-                for (size_t i = 0; i < row_numbers; ++i) {
-                    memcpy_fixed<Fixed, aligned>(current, data);
-                    current += sizeof(T);
-                    data += sizeof(Fixed);
+                if (!has_null_column.empty() && has_null_column[j]) {
+                    const auto* nullmap =
+                            assert_cast<const ColumnUInt8&>(*nullmap_columns[j]).get_data().data();
+                    // NULLIF can share its nested data with an output column; write zero only
+                    // into the packed key to preserve the input values.
+                    for (size_t i = 0; i < row_numbers; ++i) {
+                        memcpy_fixed<Fixed, aligned>(
+                                current, nullmap[i] ? reinterpret_cast<const char*>(&zero) : data);
+                        current += sizeof(T);
+                        data += sizeof(Fixed);
+                    }
+                } else {
+                    for (size_t i = 0; i < row_numbers; ++i) {
+                        memcpy_fixed<Fixed, aligned>(current, data);
+                        current += sizeof(T);
+                        data += sizeof(Fixed);
+                    }
                 }
             };
             auto foo = [&]<typename Fixed>(Fixed zero) {
