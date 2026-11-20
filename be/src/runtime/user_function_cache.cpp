@@ -567,6 +567,17 @@ Status UserFunctionCache::_check_and_return_default_java_udf_url(const std::stri
     return Status::OK();
 }
 
+std::set<int64_t> UserFunctionCache::collect_pyudf_ids() {
+    std::set<int64_t> ids;
+    std::scoped_lock lock(_cache_lock);
+    for (const auto& [id, entry] : _entry_map) {
+        if (entry->type == LibType::PY_ZIP) {
+            ids.insert(id);
+        }
+    }
+    return ids;
+}
+
 void UserFunctionCache::drop_function_cache(int64_t fid) {
     std::shared_ptr<UserFunctionCacheEntry> entry = nullptr;
     {

@@ -23,6 +23,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -539,6 +540,27 @@ TEST_F(UserFunctionCacheTest, LoadEntryFromLibInvalidFileName) {
 
     Status status = ufc._load_entry_from_lib(sub_dir, invalid_name);
     EXPECT_FALSE(status.ok());
+}
+
+TEST_F(UserFunctionCacheTest, CollectPyUdfIdsReturnsOnlyPythonZipEntries) {
+    std::string py_sub_dir = test_dir_ + "/0";
+    std::string jar_sub_dir = test_dir_ + "/1";
+    std::filesystem::create_directories(py_sub_dir);
+    std::filesystem::create_directories(jar_sub_dir);
+
+    std::string py_name = "1001.checksum1.udf.zip";
+    ASSERT_TRUE(create_zip_file(py_sub_dir + "/" + py_name,
+                                {{"main.py", "def evaluate(x): return x"}}));
+    ASSERT_TRUE(ufc._load_entry_from_lib(py_sub_dir, py_name).ok());
+
+    std::string jar_name = "1002.checksum2.udf.jar";
+    create_text_file(jar_sub_dir + "/" + jar_name, "jar bytes");
+    ASSERT_TRUE(ufc._load_entry_from_lib(jar_sub_dir, jar_name).ok());
+
+    EXPECT_EQ(ufc.collect_pyudf_ids(), std::set<int64_t>({1001}));
+
+    ufc.drop_function_cache(1001);
+    EXPECT_TRUE(ufc.collect_pyudf_ids().empty());
 }
 
 } // namespace doris

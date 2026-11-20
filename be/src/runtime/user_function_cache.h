@@ -20,6 +20,7 @@
 #include <stdint.h>
 
 #include <mutex>
+#include <set>
 #include <string>
 #include <unordered_map>
 
@@ -64,6 +65,8 @@ public:
 
     // Drop the cached function library by function id.
     void drop_function_cache(int64_t fid);
+
+    std::set<int64_t> collect_pyudf_ids();
 
 #ifndef BE_TEST
 private:
