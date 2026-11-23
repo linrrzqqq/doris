@@ -109,6 +109,10 @@ public class AgentTaskQueue {
         --taskNum;
     }
 
+    static synchronized Set<Long> getBackendIds() {
+        return new HashSet<>(tasks.rowKeySet());
+    }
+
     public static synchronized void removeTask(long backendId, Consumer<AgentTask> onTaskRemoved) {
         removeTask(backendId, onTaskRemoved, true);
     }

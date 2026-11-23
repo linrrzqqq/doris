@@ -102,6 +102,8 @@ public class Database extends MetaObject implements Writable, DatabaseIf<Table>,
     // user define function
     @SerializedName(value = "name2Function")
     private ConcurrentMap<String, ImmutableList<Function>> name2Function = Maps.newConcurrentMap();
+    // Active and recoverable databases share the index owned by their Env.
+    private transient Map<Long, Function> id2Function = new HashMap<>();
     // user define encryptKey for current db
     @SerializedName(value = "dbEncryptKey")
     private DatabaseEncryptKey dbEncryptKey;
@@ -170,11 +172,11 @@ public class Database extends MetaObject implements Writable, DatabaseIf<Table>,
         return ctlName;
     }
 
-    public void markDropped() {
+    public synchronized void markDropped() {
         isDropped = true;
     }
 
-    public void unmarkDropped() {
+    public synchronized void unmarkDropped() {
         isDropped = false;
     }
 
@@ -775,10 +777,12 @@ public class Database extends MetaObject implements Writable, DatabaseIf<Table>,
     }
 
     public synchronized void addFunction(Function function, boolean ifNotExists) throws UserException {
+        checkFunctionDdlAllowed();
         addFunctions(ImmutableList.of(function), ifNotExists, false);
     }
 
     public synchronized void addTableFunction(Function function, boolean ifNotExists) throws UserException {
+        checkFunctionDdlAllowed();
         // Doris table functions are registered as two functions: the normal function and its outer variant.
         Function outerFunction = function.clone();
         FunctionName name = outerFunction.getFunctionName();
@@ -828,6 +832,7 @@ public class Database extends MetaObject implements Writable, DatabaseIf<Table>,
             for (Function function : functions) {
                 function.checkWritable();
                 if (FunctionUtil.addFunctionImpl(function, ifNotExists, false, name2Function)) {
+                    id2Function.put(function.getId(), function);
                     addedFunctions.add(function);
                 }
             }
@@ -839,7 +844,9 @@ public class Database extends MetaObject implements Writable, DatabaseIf<Table>,
                 FunctionUtil.dropFromNereids(this.getFullName(), getFunctionSearchDesc(function));
             }
             for (int i = addedFunctions.size() - 1; i >= 0; i--) {
-                FunctionUtil.removeFunctionImpl(addedFunctions.get(i), true, name2Function);
+                Function function = addedFunctions.get(i);
+                FunctionUtil.removeFunctionImpl(function, true, name2Function);
+                id2Function.remove(function.getId(), function);
             }
             throw e;
         }
@@ -859,6 +866,7 @@ public class Database extends MetaObject implements Writable, DatabaseIf<Table>,
     public synchronized void replayAddFunction(Function function) {
         try {
             FunctionUtil.addFunctionImpl(function, false, true, name2Function);
+            id2Function.put(function.getId(), function);
             FunctionUtil.translateToNereids(this.getFullName(), function);
         } catch (UserException e) {
             throw new RuntimeException(e);
@@ -866,7 +874,8 @@ public class Database extends MetaObject implements Writable, DatabaseIf<Table>,
     }
 
     public synchronized List<Long> dropFunction(FunctionSearchDesc function, boolean ifExists) throws UserException {
-        Function udfFunction = null;
+        checkFunctionDdlAllowed();
+        Function udfFunction;
         try {
             // here we must first getFunction, as dropFunctionImpl will remove it
             udfFunction = getFunction(function);
@@ -882,7 +891,7 @@ public class Database extends MetaObject implements Writable, DatabaseIf<Table>,
         List<Long> droppedFunctionIds = Lists.newArrayList();
         dropFunctionImpl(function, ifExists);
         droppedFunctionIds.add(udfFunction.getId());
-        if (udfFunction != null && udfFunction.isUDTFunction()) {
+        if (udfFunction.isUDTFunction()) {
             // all of the table function in doris will have two function
             // one is the normal, and another is outer, the different of them is deal with
             // empty: whether need to insert NULL result value
@@ -890,13 +899,7 @@ public class Database extends MetaObject implements Writable, DatabaseIf<Table>,
                     function.getName().getFunction() + "_outer");
             FunctionSearchDesc functionOuter = new FunctionSearchDesc(name, function.getArgTypes(),
                     function.isVariadic());
-            Function udfOuterFunction = null;
-            try {
-                udfOuterFunction = getFunction(functionOuter);
-            } catch (AnalysisException e) {
-                // Let dropFunctionImpl preserve the existing IF EXISTS and error behavior.
-            }
-            dropFunctionImpl(functionOuter, ifExists);
+            Function udfOuterFunction = dropFunctionImpl(functionOuter, ifExists);
             if (udfOuterFunction != null) {
                 droppedFunctionIds.add(udfOuterFunction.getId());
             }
@@ -904,21 +907,27 @@ public class Database extends MetaObject implements Writable, DatabaseIf<Table>,
         return droppedFunctionIds;
     }
 
-    public synchronized void dropFunctionImpl(FunctionSearchDesc function, boolean ifExists) throws UserException {
-        if (FunctionUtil.dropFunctionImpl(function, ifExists, name2Function)) {
+    private Function dropFunctionImpl(FunctionSearchDesc function, boolean ifExists) throws UserException {
+        Function dropped = FunctionUtil.dropFunctionImpl(function, ifExists, name2Function);
+        if (dropped != null) {
+            id2Function.remove(dropped.getId(), dropped);
             Env.getCurrentEnv().getEditLog().logDropFunction(function);
             FunctionUtil.dropFromNereids(this.getFullName(), function);
             LOG.info("finished to drop function {}", function.getName().getFunction());
         }
+        return dropped;
     }
 
     public synchronized void replayDropFunction(FunctionSearchDesc functionSearchDesc) {
         try {
             // Set ifExists to true to avoid throw exception if function is not found.
             // It should not happen but the reason is unknown, so add warn log for debug.
-            if (!FunctionUtil.dropFunctionImpl(functionSearchDesc, true, name2Function)) {
+            Function dropped = FunctionUtil.dropFunctionImpl(functionSearchDesc, true, name2Function);
+            if (dropped == null) {
                 LOG.warn("failed to find function to drop: {} when replay, skip",
                         functionSearchDesc.getName().getFunction());
+            } else {
+                id2Function.remove(dropped.getId(), dropped);
             }
             FunctionUtil.dropFromNereids(this.getFullName(), functionSearchDesc);
             LOG.info("finished to replay drop function {}", functionSearchDesc.getName().getFunction());
@@ -933,6 +942,37 @@ public class Database extends MetaObject implements Writable, DatabaseIf<Table>,
 
     public synchronized List<Function> getFunctions() {
         return FunctionUtil.getFunctions(name2Function);
+    }
+
+    synchronized void attachFunctionIndex(ConcurrentMap<Long, Function> functionsById) {
+        id2Function = functionsById;
+        for (Function function : getFunctions()) {
+            id2Function.put(function.getId(), function);
+        }
+    }
+
+    synchronized void detachFunctionIndex() {
+        detachFunctionIndex(getFunctions());
+    }
+
+    public synchronized Map<Long, String> detachFunctionsForCleanup() {
+        List<Function> functions = getFunctions();
+        Map<Long, String> signatures = FunctionUtil.collectFunctionsForCleanup(functions);
+        detachFunctionIndex(functions);
+        return signatures;
+    }
+
+    private void detachFunctionIndex(List<Function> functions) {
+        for (Function function : functions) {
+            id2Function.remove(function.getId(), function);
+        }
+        id2Function = new HashMap<>();
+    }
+
+    private void checkFunctionDdlAllowed() throws DdlException {
+        if (isDropped) {
+            throw new DdlException("unknown db, dbName=" + fullQualifiedName);
+        }
     }
 
     public synchronized void addEncryptKey(EncryptKey encryptKey, boolean ifNotExists) throws UserException {

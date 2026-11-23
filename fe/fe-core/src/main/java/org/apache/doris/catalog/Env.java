@@ -358,6 +358,7 @@ import java.util.UUID;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
@@ -397,6 +398,7 @@ public class Env {
     private MonitoredReentrantLock lock;
 
     private CatalogMgr catalogMgr;
+    private final ConcurrentMap<Long, Function> id2Function = Maps.newConcurrentMap();
     private GlobalFunctionMgr globalFunctionMgr;
     protected LoadManager loadManager;
     private ProgressManager progressManager;
@@ -877,6 +879,7 @@ public class Env {
         this.statisticsJobAppender = new StatisticsJobAppender();
         this.statisticsMetricCollector = new StatisticsMetricCollector();
         this.globalFunctionMgr = new GlobalFunctionMgr();
+        this.globalFunctionMgr.attachFunctionIndex(id2Function);
         this.workloadGroupMgr = new WorkloadGroupMgr();
         this.computeGroupMgr = new ComputeGroupMgr(systemInfo);
         this.workloadSchedPolicyMgr = new WorkloadSchedPolicyMgr();
@@ -909,6 +912,7 @@ public class Env {
         }
         this.tsoService = new TSOService();
         this.tableStreamManager = new TableStreamManager();
+        getInternalCatalog().getDbs().forEach(this::attachDbFunctionIndex);
     }
 
     public static Map<String, Long> getSessionReportTimeMap() {
@@ -2605,6 +2609,7 @@ public class Env {
     }
 
     public long loadRecycleBin(DataInputStream dis, long checksum) throws IOException {
+        recycleBin.detachFunctionIndexes();
         recycleBin = CatalogRecycleBin.read(dis);
         // add tablet in Recycle bin to TabletInvertedIndex
         recycleBin.addTabletToInvertedIndex();
@@ -2613,6 +2618,7 @@ public class Env {
         for (Long dbId : recycleBin.getAllDbIds()) {
             globalTransactionMgr.addDatabaseTransactionMgr(dbId);
         }
+        recycleBin.attachFunctionIndexes(id2Function);
         LOG.info("finished replay recycleBin from image");
         return checksum;
     }
@@ -2733,7 +2739,9 @@ public class Env {
         // When enable the multi catalog in the first time, the "mgr" will be a null value.
         // So ignore it to use default catalog manager.
         if (mgr != null) {
+            getInternalCatalog().getDbs().forEach(this::detachDbFunctionIndex);
             this.catalogMgr = mgr;
+            getInternalCatalog().getDbs().forEach(this::attachDbFunctionIndex);
         }
         LOG.info("finished replay catalog from image");
         return checksum;
@@ -2743,7 +2751,10 @@ public class Env {
      * Load global function.
      **/
     public long loadGlobalFunction(DataInputStream in, long checksum) throws IOException {
-        this.globalFunctionMgr = GlobalFunctionMgr.read(in);
+        GlobalFunctionMgr loaded = GlobalFunctionMgr.read(in);
+        globalFunctionMgr.detachFunctionIndex();
+        globalFunctionMgr = loaded;
+        globalFunctionMgr.attachFunctionIndex(id2Function);
         LOG.info("finished replay global function from image");
         return checksum;
     }
@@ -7790,6 +7801,24 @@ public class Env {
 
     public GlobalFunctionMgr getGlobalFunctionMgr() {
         return globalFunctionMgr;
+    }
+
+    public Function getFunctionById(long functionId) {
+        return id2Function.get(functionId);
+    }
+
+    /**
+     * Binds {@code db} to Env's shared {@code id2Function} index and indexes its existing functions.
+     */
+    public void attachDbFunctionIndex(Database db) {
+        db.attachFunctionIndex(id2Function);
+    }
+
+    /**
+     * Unbinds {@code db} from Env's shared {@code id2Function} index without removing entries from {@code db}.
+     */
+    public void detachDbFunctionIndex(Database db) {
+        db.detachFunctionIndex();
     }
 
     public StatisticsCleaner getStatisticsCleaner() {

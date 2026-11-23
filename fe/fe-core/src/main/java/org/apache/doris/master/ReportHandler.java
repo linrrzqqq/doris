@@ -66,6 +66,7 @@ import org.apache.doris.task.AgentBatchTask;
 import org.apache.doris.task.AgentTask;
 import org.apache.doris.task.AgentTaskExecutor;
 import org.apache.doris.task.AgentTaskQueue;
+import org.apache.doris.task.CleanUDFCacheTask;
 import org.apache.doris.task.ClearTransactionTask;
 import org.apache.doris.task.CreateReplicaTask;
 import org.apache.doris.task.DropReplicaTask;
@@ -134,6 +135,7 @@ public class ReportHandler extends Daemon {
         DISK,
         TABLET,
         INDEX_POLICY,
+        UDF_CACHE,
     }
 
     public ReportHandler() {
@@ -217,6 +219,10 @@ public class ReportHandler extends Daemon {
             reportType = ReportType.INDEX_POLICY;
         }
 
+        if (request.isSetUdfIds()) {
+            reportType = ReportType.UDF_CACHE;
+        }
+
         if (tablets == null) {
             numTablets = request.isSetNumTablets() ? request.getNumTablets() : 0;
         } else {
@@ -242,7 +248,7 @@ public class ReportHandler extends Daemon {
         ReportTask reportTask = new ReportTask(beId, reportType, tasks, disks, tablets, partitionsVersion,
                 reportVersion, request.getStoragePolicy(), request.getResource(), request.getNumCores(),
                 request.getPipelineExecutorSize(), numTablets, request.getIndexPolicy(),
-                request.isSetRunningTasks() ? request.getRunningTasks() : -1);
+                request.isSetRunningTasks() ? request.getRunningTasks() : -1, request.getUdfIds());
         try {
             putToQueue(reportTask);
         } catch (Exception e) {
@@ -335,12 +341,14 @@ public class ReportHandler extends Daemon {
         private long runningTasks;
         private long numTablets;
         private List<TIndexPolicy> indexPolicys;
+        private final Set<Long> udfIds;
 
         public ReportTask(long beId, ReportType reportType, Map<TTaskType, Set<Long>> tasks,
                 Map<String, TDisk> disks, Map<Long, TTablet> tablets,
                 Map<Long, Long> partitionsVersion, long reportVersion,
                 List<TStoragePolicy> storagePolicies, List<TStorageResource> storageResources, int cpuCores,
-                int pipelineExecutorSize, long numTablets, List<TIndexPolicy> indexPolicys, long runningTasks) {
+                int pipelineExecutorSize, long numTablets, List<TIndexPolicy> indexPolicys, long runningTasks,
+                Set<Long> udfIds) {
             this.beId = beId;
             this.reportType = reportType;
             this.tasks = tasks;
@@ -355,10 +363,14 @@ public class ReportHandler extends Daemon {
             this.numTablets = numTablets;
             this.indexPolicys = indexPolicys;
             this.runningTasks = runningTasks;
+            this.udfIds = udfIds;
         }
 
         @Override
         protected void exec() {
+            if (udfIds != null) {
+                udfCacheReport(beId, udfIds);
+            }
             if (tasks != null) {
                 ReportHandler.taskReport(beId, tasks, runningTasks);
             }
@@ -386,6 +398,29 @@ public class ReportHandler extends Daemon {
                     tabletReport(beId, tablets, partitions, reportVersion, numTablets);
                 }
             }
+        }
+    }
+
+    static void udfCacheReport(long backendId, Set<Long> functionIds) {
+        if (functionIds.isEmpty()) {
+            return;
+        }
+        // A queued report can outlive removal of its backend.
+        if (Env.getCurrentSystemInfo().getBackend(backendId) == null) {
+            return;
+        }
+        List<Long> unknownFunctionIds = new ArrayList<>();
+        List<CleanUDFCacheTask> cleanups = new ArrayList<>();
+        for (long functionId : functionIds) {
+            if (Env.getCurrentEnv().getFunctionById(functionId) == null) {
+                unknownFunctionIds.add(functionId);
+                cleanups.add(new CleanUDFCacheTask(backendId, "", functionId));
+            }
+        }
+        if (!cleanups.isEmpty()) {
+            LOG.info("schedule CLEAN_UDF_CACHE for backend {} unknown UDF IDs {}",
+                    backendId, unknownFunctionIds);
+            CleanUDFCacheTask.submitTasks(cleanups);
         }
     }
 

@@ -19,16 +19,27 @@ package org.apache.doris.catalog;
 
 import org.apache.doris.common.DdlException;
 import org.apache.doris.common.ExceptionChecker;
+import org.apache.doris.common.jmockit.Deencapsulation;
 import org.apache.doris.nereids.parser.NereidsParser;
 import org.apache.doris.nereids.trees.plans.commands.RecoverDatabaseCommand;
+import org.apache.doris.system.Backend;
+import org.apache.doris.task.AgentTask;
+import org.apache.doris.task.AgentTaskQueue;
+import org.apache.doris.task.CleanUDFCacheTask;
+import org.apache.doris.thrift.TTaskType;
 import org.apache.doris.utframe.TestWithFeService;
 
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 public class DropDbTest extends TestWithFeService {
+    private Backend cleanupBackend;
 
     @Override
     protected void runBeforeAll() throws Exception {
@@ -39,6 +50,174 @@ public class DropDbTest extends TestWithFeService {
                 + "distributed by hash(k2) buckets 1" + " properties('replication_num' = '1');");
         createTable("create table test2.tbl1" + "(k1 int, k2 bigint)" + " duplicate key(k1) "
                 + "distributed by hash(k2) buckets 1 " + "properties('replication_num' = '1');");
+        cleanupBackend = new Backend(Env.getCurrentEnv().getNextId(), "127.0.0.1", 19050);
+        cleanupBackend.setBePort(19060);
+        cleanupBackend.setAlive(false);
+        Env.getCurrentSystemInfo().addBackend(cleanupBackend);
+    }
+
+    @Override
+    protected void runAfterAll() {
+        Env.getCurrentSystemInfo().replayDropBackend(cleanupBackend);
+        for (AgentTask task : cleanupTasks()) {
+            AgentTaskQueue.removeTask(cleanupBackend.getId(), TTaskType.CLEAN_UDF_CACHE, task.getSignature());
+        }
+    }
+
+    @Test
+    public void testDropDbPreservesFunctionsForRecovery() throws Exception {
+        Database db = createDatabaseWithFunctions("drop_function_cache_db");
+        List<Function> originalFunctions = db.getFunctions();
+        Set<Long> functionIds = functionIds(db);
+        dropDatabaseWithSql("drop database drop_function_cache_db");
+        assertFunctionCacheCleanupAbsent(db);
+        for (Function function : originalFunctions) {
+            Assertions.assertSame(function, Env.getCurrentEnv().getFunctionById(function.getId()));
+        }
+        RecoverDatabaseCommand recover = (RecoverDatabaseCommand) new NereidsParser()
+                .parseSingle("recover database drop_function_cache_db");
+        recover.run(connectContext, null);
+        Database recovered = Env.getCurrentInternalCatalog().getDbOrMetaException("drop_function_cache_db");
+        Assertions.assertEquals(functionIds, functionIds(recovered));
+        for (Function original : originalFunctions) {
+            Function restored = recovered.getFunctions().stream()
+                    .filter(function -> function.signatureString().equals(original.signatureString()))
+                    .findFirst().orElseThrow();
+            Assertions.assertSame(original, restored);
+            Assertions.assertSame(restored, Env.getCurrentEnv().getFunctionById(original.getId()));
+        }
+    }
+
+    @Test
+    public void testForceDropDbSubmitsFunctionCacheCleanup() throws Exception {
+        Database db = createDatabaseWithFunctions("force_drop_function_cache_db");
+        dropDatabaseWithSql("drop database force_drop_function_cache_db force");
+        assertFunctionCacheCleanupQueued(db);
+        Assertions.assertNull(Env.getCurrentInternalCatalog().getDbNullable(db.getFullName()));
+    }
+
+    @Test
+    public void testExpiredDbSubmitsFunctionCacheCleanup() throws Exception {
+        assertErasedDbSubmitsFunctionCacheCleanup("expired");
+    }
+
+    @Test
+    public void testSameNameErasedDbSubmitsFunctionCacheCleanup() throws Exception {
+        assertErasedDbSubmitsFunctionCacheCleanup("same_name");
+    }
+
+    @Test
+    public void testInstantlyErasedDbSubmitsFunctionCacheCleanup() throws Exception {
+        assertErasedDbSubmitsFunctionCacheCleanup("instantly");
+    }
+
+    @Test
+    public void testDropDbWithoutFunctionsDoesNotSubmitCacheCleanup() throws Exception {
+        createDatabaseWithSql("create database drop_empty_function_cache_db");
+        List<AgentTask> tasks = cleanupTasks();
+        dropDatabaseWithSql("drop database drop_empty_function_cache_db force");
+        Assertions.assertEquals(tasks, cleanupTasks());
+    }
+
+    @Test
+    public void testForceDropDbEraseDoesNotResubmitFunctionCacheCleanup() throws Exception {
+        Database periodicDb = createDatabaseWithFunctions("force_drop_periodic_erase_db");
+        dropDatabaseWithSql("drop database force_drop_periodic_erase_db force");
+        assertFunctionCacheCleanupQueued(periodicDb);
+        for (long functionId : functionIds(periodicDb)) {
+            AgentTaskQueue.removeTask(cleanupBackend.getId(), TTaskType.CLEAN_UDF_CACHE, functionId);
+        }
+        assertFunctionCacheCleanupAbsent(periodicDb);
+
+        Deencapsulation.invoke(Env.getCurrentRecycleBin(), "eraseDatabase", System.currentTimeMillis(), -1);
+        Assertions.assertFalse(Env.getCurrentRecycleBin().isRecycleDatabase(periodicDb.getId()));
+        assertFunctionCacheCleanupAbsent(periodicDb);
+
+        Database instantDb = createDatabaseWithFunctions("force_drop_instant_erase_db");
+        dropDatabaseWithSql("drop database force_drop_instant_erase_db force");
+        assertFunctionCacheCleanupQueued(instantDb);
+        for (long functionId : functionIds(instantDb)) {
+            AgentTaskQueue.removeTask(cleanupBackend.getId(), TTaskType.CLEAN_UDF_CACHE, functionId);
+        }
+        assertFunctionCacheCleanupAbsent(instantDb);
+
+        Env.getCurrentRecycleBin().eraseDatabaseInstantly(instantDb.getId());
+        Assertions.assertFalse(Env.getCurrentRecycleBin().isRecycleDatabase(instantDb.getId()));
+        assertFunctionCacheCleanupAbsent(instantDb);
+    }
+
+    private void assertErasedDbSubmitsFunctionCacheCleanup(String kind) throws Exception {
+        Database db = createDatabaseWithFunctions("erase_" + kind + "_function_cache_db");
+        dropDatabaseWithSql("drop database " + db.getFullName());
+        assertFunctionCacheCleanupAbsent(db);
+        for (Function function : db.getFunctions()) {
+            Assertions.assertSame(function, Env.getCurrentEnv().getFunctionById(function.getId()));
+        }
+        CatalogRecycleBin recycleBin = Env.getCurrentRecycleBin();
+        switch (kind) {
+            case "expired":
+                recycleBin.setRecycleTimeByIdForReplay(db.getId(), 1L);
+                Deencapsulation.invoke(recycleBin, "eraseDatabase", System.currentTimeMillis(), -1);
+                break;
+            case "same_name":
+                recycleBin.setRecycleTimeByIdForReplay(db.getId(), 1L);
+                Deencapsulation.invoke(recycleBin, "eraseDatabaseWithSameName", db.getFullName(),
+                        System.currentTimeMillis(), 0, new ArrayList<>(List.of(db.getId())));
+                break;
+            case "instantly":
+                recycleBin.eraseDatabaseInstantly(db.getId());
+                break;
+            default:
+                throw new AssertionError(kind);
+        }
+        Assertions.assertFalse(recycleBin.isRecycleDatabase(db.getId()));
+        assertFunctionCacheCleanupQueued(db);
+        for (Function function : db.getFunctions()) {
+            Assertions.assertNull(Env.getCurrentEnv().getFunctionById(function.getId()));
+        }
+    }
+
+    private Database createDatabaseWithFunctions(String dbName) throws Exception {
+        createDatabaseWithSql("create database " + dbName);
+        createFunction("create function " + dbName + ".py_scalar(int) returns int properties("
+                + "'type'='PYTHON_UDF', 'symbol'='evaluate', 'runtime_version'='3.10.2')");
+        createFunction("create aggregate function " + dbName + ".py_agg(int) returns int properties("
+                + "'type'='PYTHON_UDF', 'symbol'='Agg', 'runtime_version'='3.10.2')");
+        createFunction("create tables function " + dbName + ".py_table(int) returns array<int> properties("
+                + "'type'='PYTHON_UDF', 'symbol'='evaluate', 'runtime_version'='3.10.2')");
+        createFunction("create function " + dbName + ".java_scalar(timestamp_ns) returns timestamp_ns "
+                + "properties('type'='JAVA_UDF', 'symbol'='org.apache.doris.catalog.TimestampNsUdf')");
+        createFunction("create alias function " + dbName + ".fe_alias(int) with parameter(value) as abs(value)");
+        Database db = Env.getCurrentInternalCatalog().getDbOrMetaException(dbName);
+        Assertions.assertEquals(6, functionIds(db).size());
+        Assertions.assertTrue(db.getFunctions().stream()
+                .anyMatch(function -> function.getFunctionName().getFunction().equals("py_table_outer")));
+        return db;
+    }
+
+    private Set<Long> functionIds(Database db) {
+        return db.getFunctions().stream().map(Function::getId).collect(Collectors.toSet());
+    }
+
+    private List<AgentTask> cleanupTasks() {
+        return AgentTaskQueue.getTask(cleanupBackend.getId(), TTaskType.CLEAN_UDF_CACHE);
+    }
+
+    private void assertFunctionCacheCleanupAbsent(Database db) {
+        Set<Long> functionIds = functionIds(db);
+        Assertions.assertTrue(cleanupTasks().stream().noneMatch(task -> functionIds.contains(task.getSignature())));
+    }
+
+    private void assertFunctionCacheCleanupQueued(Database db) {
+        Map<Long, String> functions = db.getFunctions().stream()
+                .filter(function -> !function.functionName().equals("fe_alias"))
+                .collect(Collectors.toMap(Function::getId, Function::signatureString));
+        Set<Long> databaseFunctionIds = functionIds(db);
+        Map<Long, String> queuedFunctions = cleanupTasks().stream()
+                .filter(task -> databaseFunctionIds.contains(task.getSignature()))
+                .map(task -> ((CleanUDFCacheTask) task).toThrift())
+                .collect(Collectors.toMap(task -> task.getFunctionId(), task -> task.getFunctionSignature()));
+        Assertions.assertEquals(functions, queuedFunctions);
     }
 
     @Test

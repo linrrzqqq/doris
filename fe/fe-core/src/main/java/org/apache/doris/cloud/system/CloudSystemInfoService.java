@@ -53,6 +53,7 @@ import org.apache.doris.service.FrontendOptions;
 import org.apache.doris.system.Backend;
 import org.apache.doris.system.Frontend;
 import org.apache.doris.system.SystemInfoService;
+import org.apache.doris.task.AgentTaskQueue;
 import org.apache.doris.thrift.TStorageMedium;
 
 import com.google.common.annotations.VisibleForTesting;
@@ -586,6 +587,7 @@ public class CloudSystemInfoService extends SystemInfoService {
         toDel.forEach(i -> copiedBackends.remove(i.getId()));
         ImmutableMap<Long, Backend> newIdToBackend = ImmutableMap.copyOf(copiedBackends);
         idToBackendRef = newIdToBackend;
+        toDel.forEach(backend -> AgentTaskQueue.removeBackendTasks(backend.getId()));
         // backends is changed, regenerated tablet number metrics
         // metric repo should be regenerated after setting `idToBackendRef`
         LOG.info("Add {} and delete {} backend metrics", toAdd.size(), toDel.size());

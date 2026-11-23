@@ -359,6 +359,7 @@ DECLARE_mBool(enable_download_md5sum_check);
 DECLARE_mInt32(download_binlog_meta_timeout_ms);
 // the interval time(seconds) for agent report index policy to FE
 DECLARE_mInt32(report_index_policy_interval_seconds);
+DECLARE_Int32(report_udf_cache_interval_seconds);
 
 // DNS cache: log the "Failed to resolve hostname ... use cached ip" warning
 // only once per N consecutive failures for the same hostname, to avoid

@@ -33,6 +33,7 @@ import org.apache.doris.mtmv.BaseTableInfo;
 import org.apache.doris.persist.RecoverInfo;
 import org.apache.doris.persist.gson.GsonUtils;
 import org.apache.doris.qe.GlobalVariable;
+import org.apache.doris.task.CleanUDFCacheTask;
 import org.apache.doris.thrift.TInvertedIndexFileStorageFormat;
 import org.apache.doris.thrift.TStorageMedium;
 
@@ -58,6 +59,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -331,6 +333,7 @@ public class CatalogRecycleBin extends MasterDaemon implements Writable {
 
             // 2. erase each expired database one at a time
             for (Long dbId : expiredIds) {
+                Map<Long, String> functionSignatures = Collections.emptyMap();
                 writeLock();
                 try {
                     RecycleDatabaseInfo dbInfo = idToDatabase.remove(dbId);
@@ -338,19 +341,20 @@ public class CatalogRecycleBin extends MasterDaemon implements Writable {
                         continue;
                     }
                     Database db = dbInfo.getDb();
-                    idToRecycleTime.remove(dbId);
+                    Long recycleTime = idToRecycleTime.remove(dbId);
 
                     dbNameToIds.computeIfPresent(db.getFullName(), (k, v) -> {
                         v.remove(db.getId());
                         return v.isEmpty() ? null : v;
                     });
 
-                    Env.getCurrentEnv().eraseDatabase(db.getId(), true);
+                    functionSignatures = eraseDatabase(db, recycleTime);
                     LOG.info("erase db[{}]", db.getId());
                     eraseNum++;
                 } finally {
                     writeUnlock();
                 }
+                CleanUDFCacheTask.submitCleanup(functionSignatures);
             }
 
             // 3. erase exceed number
@@ -384,6 +388,7 @@ public class CatalogRecycleBin extends MasterDaemon implements Writable {
             readUnlock();
         }
         for (Long dbId : dbIdToErase) {
+            Map<Long, String> functionSignatures = Collections.emptyMap();
             writeLock();
             try {
                 RecycleDatabaseInfo dbInfo = idToDatabase.get(dbId);
@@ -394,18 +399,19 @@ public class CatalogRecycleBin extends MasterDaemon implements Writable {
                     continue;
                 }
                 idToDatabase.remove(dbId);
-                idToRecycleTime.remove(dbId);
+                Long recycleTime = idToRecycleTime.remove(dbId);
 
                 dbNameToIds.computeIfPresent(dbName, (k, v) -> {
                     v.remove(dbId);
                     return v.isEmpty() ? null : v;
                 });
 
-                Env.getCurrentEnv().eraseDatabase(dbId, true);
+                functionSignatures = eraseDatabase(dbInfo.getDb(), recycleTime);
                 LOG.info("erase database[{}] name: {}", dbId, dbName);
             } finally {
                 writeUnlock();
             }
+            CleanUDFCacheTask.submitCleanup(functionSignatures);
         }
     }
 
@@ -454,6 +460,15 @@ public class CatalogRecycleBin extends MasterDaemon implements Writable {
         return allEraseTasksCreated;
     }
 
+    private Map<Long, String> eraseDatabase(Database db, Long recycleTime) {
+        Env.getCurrentEnv().eraseDatabase(db.getId(), true);
+        // Force-dropped databases (recycleTime == 0) already submitted cleanup in InternalCatalog.dropDb().
+        if (recycleTime != null && recycleTime > 0) {
+            return db.detachFunctionsForCleanup();
+        }
+        return Collections.emptyMap();
+    }
+
     public void replayEraseDatabase(long dbId) {
         writeLock();
         try {
@@ -461,6 +476,7 @@ public class CatalogRecycleBin extends MasterDaemon implements Writable {
             idToRecycleTime.remove(dbId);
 
             if (dbInfo != null) {
+                Env.getCurrentEnv().detachDbFunctionIndex(dbInfo.getDb());
                 dbNameToIds.computeIfPresent(dbInfo.getDb().getFullName(), (k, v) -> {
                     v.remove(dbId);
                     return v.isEmpty() ? null : v;
@@ -1212,13 +1228,13 @@ public class CatalogRecycleBin extends MasterDaemon implements Writable {
     public void eraseDatabaseInstantly(long dbId) throws DdlException {
         // 1. erase db
         RecycleDatabaseInfo dbInfo;
+        Map<Long, String> functionSignatures = Collections.emptyMap();
         writeLock();
         try {
-            dbInfo = idToDatabase.get(dbId);
+            dbInfo = idToDatabase.remove(dbId);
             if (dbInfo != null) {
-                Env.getCurrentEnv().eraseDatabase(dbId, true);
-                idToDatabase.remove(dbId);
-                idToRecycleTime.remove(dbId);
+                Long recycleTime = idToRecycleTime.remove(dbId);
+                functionSignatures = eraseDatabase(dbInfo.getDb(), recycleTime);
 
                 dbNameToIds.computeIfPresent(dbInfo.getDb().getFullName(), (k, v) -> {
                     v.remove(dbId);
@@ -1231,6 +1247,7 @@ public class CatalogRecycleBin extends MasterDaemon implements Writable {
         } finally {
             writeUnlock();
         }
+        CleanUDFCacheTask.submitCleanup(functionSignatures);
 
         // 2. collect tables with same dbId
         List<Long> tableIdToErase = new ArrayList<>();
@@ -1909,6 +1926,20 @@ public class CatalogRecycleBin extends MasterDaemon implements Writable {
     // currently only used when loading image. So no synchronized protected.
     public List<Long> getAllDbIds() {
         return Lists.newArrayList(idToDatabase.keySet());
+    }
+
+    void attachFunctionIndexes(ConcurrentMap<Long, Function> functionsById) {
+        for (Map.Entry<Long, RecycleDatabaseInfo> entry : idToDatabase.entrySet()) {
+            if (idToRecycleTime.get(entry.getKey()) > 0) {
+                entry.getValue().getDb().attachFunctionIndex(functionsById);
+            }
+        }
+    }
+
+    void detachFunctionIndexes() {
+        for (RecycleDatabaseInfo dbInfo : idToDatabase.values()) {
+            dbInfo.getDb().detachFunctionIndex();
+        }
     }
 
     // only for unit test

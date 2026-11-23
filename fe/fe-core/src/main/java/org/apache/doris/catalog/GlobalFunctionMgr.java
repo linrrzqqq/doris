@@ -33,6 +33,7 @@ import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ConcurrentMap;
 
 /**
@@ -45,6 +46,24 @@ public class GlobalFunctionMgr extends MetaObject implements GsonPostProcessable
     // user define function
     @SerializedName(value = "name2Function")
     private ConcurrentMap<String, ImmutableList<Function>> name2Function = Maps.newConcurrentMap();
+    private transient Map<Long, Function> id2Function = Maps.newHashMap();
+
+    synchronized void attachFunctionIndex(ConcurrentMap<Long, Function> functionsById) {
+        id2Function = functionsById;
+        for (Function function : getFunctions()) {
+            id2Function.put(function.getId(), function);
+        }
+    }
+
+    /**
+     * Removes global functions from Env's shared {@code id2Function} index and detaches the local reference.
+     */
+    synchronized void detachFunctionIndex() {
+        for (Function function : getFunctions()) {
+            id2Function.remove(function.getId(), function);
+        }
+        id2Function = Maps.newHashMap();
+    }
 
     public static GlobalFunctionMgr read(DataInput in) throws IOException {
         String json = Text.readString(in);
@@ -74,11 +93,13 @@ public class GlobalFunctionMgr extends MetaObject implements GsonPostProcessable
         function.setGlobal(true);
         function.checkWritable();
         if (FunctionUtil.addFunctionImpl(function, ifNotExists, false, name2Function)) {
+            id2Function.put(function.getId(), function);
             try {
                 FunctionUtil.translateToNereidsThrows(null, function);
             } catch (Exception e) {
                 LOG.warn("Nereids add function failed", e);
                 FunctionUtil.removeFunctionImpl(function, true, name2Function);
+                id2Function.remove(function.getId(), function);
                 throw e;
             }
             Env.getCurrentEnv().getEditLog().logAddGlobalFunction(function);
@@ -90,6 +111,7 @@ public class GlobalFunctionMgr extends MetaObject implements GsonPostProcessable
         try {
             function.setGlobal(true);
             FunctionUtil.addFunctionImpl(function, false, true, name2Function);
+            id2Function.put(function.getId(), function);
             FunctionUtil.translateToNereids(null, function);
         } catch (UserException e) {
             throw new RuntimeException(e);
@@ -97,13 +119,9 @@ public class GlobalFunctionMgr extends MetaObject implements GsonPostProcessable
     }
 
     public synchronized List<Long> dropFunction(FunctionSearchDesc function, boolean ifExists) throws UserException {
-        Function droppedFunction = null;
-        try {
-            droppedFunction = FunctionUtil.getFunction(function, name2Function);
-        } catch (AnalysisException e) {
-            // Let dropFunctionImpl preserve the existing IF EXISTS and error behavior.
-        }
-        if (FunctionUtil.dropFunctionImpl(function, ifExists, name2Function)) {
+        Function droppedFunction = FunctionUtil.dropFunctionImpl(function, ifExists, name2Function);
+        if (droppedFunction != null) {
+            id2Function.remove(droppedFunction.getId(), droppedFunction);
             Env.getCurrentEnv().getEditLog().logDropGlobalFunction(function);
             FunctionUtil.dropFromNereids(null, function);
             return ImmutableList.of(droppedFunction.getId());
@@ -113,7 +131,10 @@ public class GlobalFunctionMgr extends MetaObject implements GsonPostProcessable
 
     public synchronized void replayDropFunction(FunctionSearchDesc functionSearchDesc) {
         try {
-            FunctionUtil.dropFunctionImpl(functionSearchDesc, true, name2Function);
+            Function dropped = FunctionUtil.dropFunctionImpl(functionSearchDesc, true, name2Function);
+            if (dropped != null) {
+                id2Function.remove(dropped.getId(), dropped);
+            }
             FunctionUtil.dropFromNereids(null, functionSearchDesc);
         } catch (UserException e) {
             throw new RuntimeException(e);

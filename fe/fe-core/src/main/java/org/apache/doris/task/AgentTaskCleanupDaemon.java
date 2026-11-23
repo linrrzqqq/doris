@@ -41,8 +41,14 @@ public class AgentTaskCleanupDaemon extends MasterDaemon {
 
     @Override
     protected void runAfterCatalogReady() {
-        LOG.info("Begin to clean up inactive agent tasks");
+        LOG.info("Begin to clean up agent tasks");
         SystemInfoService infoService = Env.getCurrentSystemInfo();
+        for (long backendId : AgentTaskQueue.getBackendIds()) {
+            if (infoService.getBackend(backendId) == null) {
+                AgentTaskQueue.removeBackendTasks(backendId);
+            }
+        }
+        beInactiveCheckFailures.keySet().removeIf(backendId -> infoService.getBackend(backendId) == null);
         infoService.getAllClusterBackends(false)
                 .forEach(backend -> {
                     long id = backend.getId();
@@ -60,7 +66,7 @@ public class AgentTaskCleanupDaemon extends MasterDaemon {
                     }
                 });
 
-        LOG.info("Finish to clean up inactive agent tasks");
+        LOG.info("Finish to clean up agent tasks");
     }
 
     private void removeInactiveBeAgentTasks(Long beId) {

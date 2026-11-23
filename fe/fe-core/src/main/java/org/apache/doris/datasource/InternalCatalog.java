@@ -149,6 +149,7 @@ import org.apache.doris.system.SystemInfoService;
 import org.apache.doris.task.AgentBatchTask;
 import org.apache.doris.task.AgentTaskExecutor;
 import org.apache.doris.task.AgentTaskQueue;
+import org.apache.doris.task.CleanUDFCacheTask;
 import org.apache.doris.task.CreateReplicaTask;
 import org.apache.doris.task.DropReplicaTask;
 import org.apache.doris.thrift.TCompressionType;
@@ -452,6 +453,7 @@ public class InternalCatalog implements CatalogIf<Database> {
      * @param db
      */
     public void unprotectCreateDb(Database db) {
+        Env.getCurrentEnv().attachDbFunctionIndex(db);
         idToDb.put(db.getId(), db);
         fullNameToDb.put(db.getFullName(), db);
         Env.getCurrentGlobalTransactionMgr().addDatabaseTransactionMgr(db.getId());
@@ -478,6 +480,7 @@ public class InternalCatalog implements CatalogIf<Database> {
     public void dropDb(String dbName, boolean ifExists, boolean force) throws DdlException {
         LOG.info("begin drop database[{}], is force : {}", dbName, force);
 
+        Map<Long, String> functionSignatures = new HashMap<>();
         // 1. check if database exists
         if (!tryLock(false)) {
             throw new DdlException("Failed to acquire catalog lock. Try again");
@@ -537,6 +540,10 @@ public class InternalCatalog implements CatalogIf<Database> {
 
                 Env.getCurrentRecycleBin().recycleDatabase(db, tableNames, tableIds, false, force, 0);
                 recycleTime = Env.getCurrentRecycleBin().getRecycleTimeById(db.getId());
+                // Recoverable databases keep function IDs until permanent erasure.
+                if (force) {
+                    functionSignatures = db.detachFunctionsForCleanup();
+                }
             } finally {
                 db.writeUnlock();
             }
@@ -553,6 +560,7 @@ public class InternalCatalog implements CatalogIf<Database> {
             unlock();
         }
 
+        CleanUDFCacheTask.submitCleanup(functionSignatures);
         LOG.info("finish drop database[{}], is force : {}", dbName, force);
     }
 
@@ -603,6 +611,9 @@ public class InternalCatalog implements CatalogIf<Database> {
 
             fullNameToDb.remove(dbName);
             idToDb.remove(db.getId());
+            if (isForceDrop) {
+                Env.getCurrentEnv().detachDbFunctionIndex(db);
+            }
             Env.getCurrentEnv().getFunctionRegistry().dropUdfByDb(dbName);
         } finally {
             unlock();
@@ -628,6 +639,7 @@ public class InternalCatalog implements CatalogIf<Database> {
                 if (!Strings.isNullOrEmpty(newDbName)) {
                     db.setNameWithLock(newDbName);
                 }
+                Env.getCurrentEnv().attachDbFunctionIndex(db);
                 // add db to catalog
                 fullNameToDb.put(db.getFullName(), db);
                 idToDb.put(db.getId(), db);
@@ -4198,10 +4210,7 @@ public class InternalCatalog implements CatalogIf<Database> {
                 }
                 throw new IOException(errMsg);
             }
-            idToDb.put(db.getId(), db);
-            fullNameToDb.put(db.getFullName(), db);
-            Env.getCurrentGlobalTransactionMgr().addDatabaseTransactionMgr(db.getId());
-
+            unprotectCreateDb(db);
             db.analyze();
         }
         // ATTN: this should be done after load Db, and before loadAlterJob

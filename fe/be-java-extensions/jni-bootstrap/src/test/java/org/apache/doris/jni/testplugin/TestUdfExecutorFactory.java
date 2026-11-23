@@ -30,6 +30,8 @@ import java.util.List;
  */
 public class TestUdfExecutorFactory implements UdfExecutorFactory {
 
+    public boolean failInvalidation;
+
     private final List<String> invalidated = new ArrayList<>();
 
     @Override
@@ -49,6 +51,9 @@ public class TestUdfExecutorFactory implements UdfExecutorFactory {
         // Recorded as one string so the test can assert that BOTH halves arrive: a plugin keys its
         // cache by the id, and dropping the id on the way here is exactly the mistake that leaves a
         // re-created function running its predecessor's classes.
+        if (failInvalidation) {
+            throw new IllegalStateException("invalidation failed");
+        }
         invalidated.add(functionId + ":" + functionSignature);
     }
 

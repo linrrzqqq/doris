@@ -270,6 +270,7 @@ final class PluginRuntime {
      * that never cached the function does nothing.
      */
     void cleanUdfCache(long functionId, String functionSignature) {
+        IllegalStateException failure = null;
         for (PluginHandle handle : plugins.values()) {
             if (handle.state() != PluginHandle.State.READY) {
                 continue;
@@ -279,11 +280,14 @@ final class PluginRuntime {
                     factory.invalidate(functionId, functionSignature);
                 }
             } catch (Throwable t) {
-                // One plugin failing to drop its cache must not stop the others, and DROP FUNCTION
-                // has already been committed on the FE side by now.
-                LOG.log(Level.WARNING, "Java plugin '" + handle.name() + "' failed to invalidate '"
-                        + functionSignature + "' (id " + functionId + "): " + JniUtil.throwableToString(t));
+                if (failure == null) {
+                    failure = new IllegalStateException("Failed to invalidate UDF cache for function " + functionId);
+                }
+                failure.addSuppressed(new IllegalStateException("Java plugin '" + handle.name() + "'", t));
             }
+        }
+        if (failure != null) {
+            throw failure;
         }
     }
 

@@ -201,6 +201,7 @@ void clean_udf_cache_callback(const TAgentTaskRequest& req);
 void visible_version_callback(StorageEngine& engine, const TAgentTaskRequest& req);
 
 void report_task_callback(const ClusterInfo* cluster_info);
+void report_udf_cache_callback(const ClusterInfo* cluster_info);
 
 void report_disk_callback(StorageEngine& engine, const ClusterInfo* cluster_info);
 

@@ -143,11 +143,10 @@ public class MasterImpl {
                 errorMsgs.add(errMsg);
                 tStatus.setErrorMsgs(errorMsgs);
             } else {
-                // drop task is not in AgentTaskQueue
+                // Drop tasks are not in AgentTaskQueue.
                 if (taskType != TTaskType.DROP) {
                     LOG.warn("Finish task rpc got null task for request={}", request);
                 } else {
-                    // drop task is not in AgentTaskQueue
                     LOG.info("Finish task rpc for request={}", request);
                 }
             }
@@ -198,6 +197,9 @@ public class MasterImpl {
                     break;
                 case DROP:
                     finishDropReplica(task);
+                    break;
+                case CLEAN_UDF_CACHE:
+                    AgentTaskQueue.removeTask(backendId, taskType, signature);
                     break;
                 case SCHEMA_CHANGE:
                 case ROLLUP:

@@ -451,6 +451,21 @@ class PluginRuntimeTest {
     }
 
     @Test
+    void invalidationFailureReachesBeAndOtherPluginsStillCleanUp(@TempDir Path plugins) throws Exception {
+        PluginJars.deploy(plugins, "broken", TestPlugin.class, SAMPLE_CLASSES);
+        PluginJars.deploy(plugins, "healthy", TestPlugin.class, SAMPLE_CLASSES);
+        PluginRuntime runtime = runtimeOver(plugins);
+        runtime.warmup();
+        UdfExecutorFactory broken = runtime.plugin("broken").udfExecutorFactories().get("udf");
+        broken.getClass().getField("failInvalidation").setBoolean(broken, true);
+
+        Assertions.assertThrows(IllegalStateException.class, () -> runtime.cleanUdfCache(42, "db.fn(INT)"));
+        UdfExecutorFactory healthy = runtime.plugin("healthy").udfExecutorFactories().get("udf");
+        Assertions.assertEquals(Collections.singletonList("42:db.fn(INT)"),
+                healthy.getClass().getMethod("invalidatedSignatures").invoke(healthy));
+    }
+
+    @Test
     void statusReportsEveryPluginItHasTouched(@TempDir Path plugins) throws IOException {
         PluginJars.deploy(plugins, "sample", TestPlugin.class, SAMPLE_CLASSES);
         Path broken = Files.createDirectories(plugins.resolve("broken"));

@@ -48,15 +48,20 @@ import java.util.stream.Collectors;
 public class FunctionUtil {
     private static final Logger LOG = LogManager.getLogger(FunctionUtil.class);
 
+    static Map<Long, String> collectFunctionsForCleanup(List<Function> functions) {
+        return functions.stream()
+                .filter(function -> !(function instanceof AliasFunction))
+                .collect(Collectors.toMap(Function::getId, Function::signatureString));
+    }
 
     /**
      * @param function
      * @param ifExists
      * @param name2Function
-     * @return return true if we do drop the function, otherwise, return false.
+     * @return the removed function, or null if IF EXISTS skipped a missing function.
      * @throws UserException
      */
-    public static boolean dropFunctionImpl(FunctionSearchDesc function, boolean ifExists,
+    public static Function dropFunctionImpl(FunctionSearchDesc function, boolean ifExists,
             ConcurrentMap<String, ImmutableList<Function>> name2Function) throws UserException {
         String functionName = function.getName().getFunction();
         List<Function> existFuncs = name2Function.get(functionName);
@@ -65,25 +70,25 @@ public class FunctionUtil {
                 if (LOG.isDebugEnabled()) {
                     LOG.debug("function name does not exist: " + functionName);
                 }
-                return false;
+                return null;
             }
             throw new UserException("function name does not exist: " + functionName);
         }
-        boolean isFound = false;
+        Function removed = null;
         ImmutableList.Builder<Function> builder = ImmutableList.builder();
         for (Function existFunc : existFuncs) {
             if (function.isIdentical(existFunc)) {
-                isFound = true;
+                removed = existFunc;
             } else {
                 builder.add(existFunc);
             }
         }
-        if (!isFound) {
+        if (removed == null) {
             if (ifExists) {
                 if (LOG.isDebugEnabled()) {
                     LOG.debug("function does not exist: " + function);
                 }
-                return false;
+                return null;
             }
             throw new UserException("function does not exist: " + function);
         }
@@ -93,7 +98,7 @@ public class FunctionUtil {
         } else {
             name2Function.put(functionName, newFunctions);
         }
-        return true;
+        return removed;
     }
 
     /**
@@ -146,7 +151,7 @@ public class FunctionUtil {
             ConcurrentMap<String, ImmutableList<Function>> name2Function) throws UserException {
         FunctionSearchDesc functionSearchDesc = new FunctionSearchDesc(function.getFunctionName(), function.getArgs(),
                 function.hasVarArgs());
-        return dropFunctionImpl(functionSearchDesc, ifExists, name2Function);
+        return dropFunctionImpl(functionSearchDesc, ifExists, name2Function) != null;
     }
 
     public static Function getFunction(FunctionSearchDesc function,

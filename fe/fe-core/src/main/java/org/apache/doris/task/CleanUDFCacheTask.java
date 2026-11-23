@@ -17,22 +17,51 @@
 
 package org.apache.doris.task;
 
+import org.apache.doris.catalog.Env;
 import org.apache.doris.thrift.TCleanUDFCacheReq;
 import org.apache.doris.thrift.TTaskType;
 
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
-
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
 
 public class CleanUDFCacheTask extends AgentTask {
-    private static final Logger LOG = LogManager.getLogger(CleanUDFCacheTask.class);
     private String functionSignature;
     private long functionId;
 
     public CleanUDFCacheTask(long backendId, String signature, long functionId) {
-        super(null, backendId, TTaskType.CLEAN_UDF_CACHE, -1, -1, -1, -1, -1, -1, -1);
+        super(null, backendId, TTaskType.CLEAN_UDF_CACHE, -1, -1, -1, -1, -1,
+                functionId, System.currentTimeMillis());
         this.functionSignature = signature;
         this.functionId = functionId;
+    }
+
+    public static void submitCleanup(Map<Long, String> functionSignatures) {
+        if (functionSignatures.isEmpty()) {
+            return;
+        }
+        List<CleanUDFCacheTask> tasks = new ArrayList<>();
+        for (long backendId : Env.getCurrentSystemInfo().getAllBackendIds(false)) {
+            for (Map.Entry<Long, String> function : functionSignatures.entrySet()) {
+                tasks.add(new CleanUDFCacheTask(backendId, function.getValue(), function.getKey()));
+            }
+        }
+        submitTasks(tasks);
+    }
+
+    public static void submitTasks(List<CleanUDFCacheTask> tasks) {
+        if (tasks.isEmpty()) {
+            return;
+        }
+        AgentBatchTask batchTask = new AgentBatchTask();
+        for (CleanUDFCacheTask task : tasks) {
+            if (AgentTaskQueue.addTask(task)) {
+                batchTask.addTask(task);
+            }
+        }
+        if (batchTask.getTaskNum() > 0) {
+            AgentTaskExecutor.submit(batchTask);
+        }
     }
 
     public TCleanUDFCacheReq toThrift() {

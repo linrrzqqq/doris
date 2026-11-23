@@ -294,6 +294,8 @@ DEFINE_mBool(enable_download_md5sum_check, "false");
 DEFINE_mInt32(download_binlog_meta_timeout_ms, "30000");
 // the interval time(seconds) for agent report index policy to FE
 DEFINE_mInt32(report_index_policy_interval_seconds, "10");
+// Report cached UDF IDs periodically and on the first heartbeat from a new FE master.
+DEFINE_Int32(report_udf_cache_interval_seconds, "21600");
 
 // DNS cache: throttle "use cached ip" warning to once per N failures per host.
 DEFINE_mInt32(dns_cache_log_every_n_failures, "10");
